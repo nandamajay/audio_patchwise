@@ -12,6 +12,8 @@ set -e
 #    ./run.sh rebuild    → Force rebuild + restart
 #    ./run.sh logs       → Tail all logs
 #    ./run.sh status     → Show running containers
+#    ./run.sh seed       → Seed LKML ALSA/ASoC knowledge base
+#    ./run.sh test       → Run backend + frontend tests locally
 #    ./run.sh clean      → Remove containers + volumes
 # ─────────────────────────────────────────────
 
@@ -132,6 +134,19 @@ cmd_clean() {
   echo -e "  ${GREEN}✔  Clean complete.${RESET}"
 }
 
+cmd_seed() {
+  echo -e "  ${CYAN}🌱 Seeding LKML ALSA/ASoC knowledge base...${RESET}"
+  python3 -m backend.app.knowledge.seed --subsystem alsa-asoc --months 24
+  echo -e "  ${GREEN}✔  Seed complete.${RESET}"
+}
+
+cmd_test() {
+  echo -e "  ${CYAN}🧪 Running backend and frontend tests...${RESET}"
+  (cd backend && PYTHONPATH=. pytest tests -v --asyncio-mode=auto)
+  (cd frontend && npm run test -- --coverage --watchAll=false)
+  echo -e "  ${GREEN}✔  Test run complete.${RESET}"
+}
+
 # ─── Entry Point ──────────────────────────────────────────────────────────────
 COMMAND=${1:-start}
 
@@ -142,10 +157,12 @@ case "$COMMAND" in
   rebuild) cmd_rebuild ;;
   logs)    cmd_logs ;;
   status)  cmd_status ;;
+  seed)    cmd_seed ;;
+  test)    cmd_test ;;
   clean)   cmd_clean ;;
   *)
     echo -e "  ${RED}Unknown command: $COMMAND${RESET}"
-    echo "  Usage: ./run.sh [start|stop|restart|rebuild|logs|status|clean]"
+    echo "  Usage: ./run.sh [start|stop|restart|rebuild|logs|status|seed|test|clean]"
     exit 1
     ;;
 esac

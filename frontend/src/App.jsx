@@ -1,21 +1,25 @@
-import { Link, Route, Routes } from "react-router-dom";
-import InputConfig from "./pages/InputConfig";
+import { NavLink, Route, Routes } from "react-router-dom";
+
 import ConversationThread from "./pages/ConversationThread";
 import DiffOutput from "./pages/DiffOutput";
+import InputConfig from "./pages/InputConfig";
+
+const navClass = ({ isActive }) => `nav-pill ${isActive ? "active" : ""}`;
 
 export default function App() {
   return (
-    <div style={{ padding: "1rem", display: "grid", gap: "1rem" }}>
-      <nav style={{ display: "flex", gap: "1rem" }}>
-        <Link to="/">Input</Link>
-        <Link to="/conversation">Conversation</Link>
-        <Link to="/diff">Diff</Link>
+    <main className="app-shell">
+      <nav className="top-nav">
+        <NavLink to="/" className={navClass}>Input & Config</NavLink>
+        <NavLink to="/conversation" className={navClass}>Conversation</NavLink>
+        <NavLink to="/diff" className={navClass}>Diff & Output</NavLink>
       </nav>
+
       <Routes>
         <Route path="/" element={<InputConfig />} />
         <Route path="/conversation" element={<ConversationThread />} />
         <Route path="/diff" element={<DiffOutput />} />
       </Routes>
-    </div>
+    </main>
   );
 }

@@ -7,12 +7,15 @@ __pycache__/
 # Node
 node_modules/
 dist/
+coverage/
 
 # Env
 .env
 backend/.env
 frontend/.env
 .github_token
+backend/data/
+data/
 
 # OS/IDE
 .DS_Store
