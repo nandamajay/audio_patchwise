@@ -1,0 +1,29 @@
+:root {
+  --accent-blue: #4f9eff;
+  --accent-purple: #9b6dff;
+  --accent-green: #4fffb0;
+  --accent-orange: #ffb347;
+  --glass-bg: rgba(255, 255, 255, 0.04);
+  --glass-border: rgba(255, 255, 255, 0.08);
+  --glass-hover: rgba(255, 255, 255, 0.07);
+  --bg-primary: #0a0a0f;
+  --bg-secondary: #0f0f1a;
+  --bg-card: rgba(15, 15, 26, 0.8);
+  --text-primary: #f0f0ff;
+  --text-secondary: rgba(240,240,255,0.6);
+  --text-muted: rgba(240,240,255,0.35);
+  --chanakya-color: var(--accent-blue);
+  --aryabhata-color: var(--accent-purple);
+  --shadow-blue: 0 0 24px rgba(79,158,255,0.15);
+  --shadow-purple: 0 0 24px rgba(155,109,255,0.15);
+  --radius-card: 16px;
+  --radius-bubble: 12px;
+  --font-mono: "JetBrains Mono", "Fira Code", monospace;
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  font-family: "Inter", system-ui, sans-serif;
+  min-height: 100vh;
+}

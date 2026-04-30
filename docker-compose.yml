@@ -1,0 +1,41 @@
+version: "3.9"
+
+services:
+  patchwise-backend:
+    build: ./backend
+    ports:
+      - "8000:8000"
+    env_file:
+      - ./backend/.env.example
+    volumes:
+      - ./backend:/app
+      - patchwise_db:/app/data
+    depends_on:
+      - patchwise-chromadb
+
+  patchwise-frontend:
+    build: ./frontend
+    ports:
+      - "5173:5173"
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+    depends_on:
+      - patchwise-backend
+
+  patchwise-db:
+    image: busybox
+    volumes:
+      - patchwise_db:/data
+    command: ["sh", "-c", "sleep infinity"]
+
+  patchwise-chromadb:
+    image: chromadb/chroma:latest
+    ports:
+      - "8001:8000"
+    volumes:
+      - chroma_data:/chroma/chroma
+
+volumes:
+  patchwise_db:
+  chroma_data:
