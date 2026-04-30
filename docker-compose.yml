@@ -1,41 +1,41 @@
 version: "3.9"
 
 services:
-  patchwise-backend:
-    build: ./backend
-    ports:
-      - "8000:8000"
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: patchwise_backend
     env_file:
-      - ./backend/.env.example
+      - .env
     volumes:
       - ./backend:/app
-      - patchwise_db:/app/data
-    depends_on:
-      - patchwise-chromadb
-
-  patchwise-frontend:
-    build: ./frontend
+      - ./data/chromadb:/app/data/chromadb
+      - ./data/sqlite:/app/data/sqlite
+      - ./logs:/app/logs
     ports:
-      - "5173:5173"
-    volumes:
-      - ./frontend:/app
-      - /app/node_modules
-    depends_on:
-      - patchwise-backend
+      - "${BACKEND_PORT:-8000}:8000"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
-  patchwise-db:
-    image: busybox
-    volumes:
-      - patchwise_db:/data
-    command: ["sh", "-c", "sleep infinity"]
-
-  patchwise-chromadb:
-    image: chromadb/chroma:latest
+  frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile.frontend
+    container_name: patchwise_frontend
+    env_file:
+      - .env
     ports:
-      - "8001:8000"
-    volumes:
-      - chroma_data:/chroma/chroma
+      - "${FRONTEND_PORT:-3000}:3000"
+    depends_on:
+      backend:
+        condition: service_healthy
+    restart: unless-stopped
 
 volumes:
-  patchwise_db:
-  chroma_data:
+  chromadb_data:
+  sqlite_data:
