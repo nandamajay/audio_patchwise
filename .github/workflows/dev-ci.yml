@@ -2,56 +2,216 @@ name: PatchWise Dev CI
 
 on:
   push:
-    branches: [ develop, feature/*, release/* ]
+    branches: [dev, "feature/**", "fix/**"]
   pull_request:
-    branches: [ develop, main ]
+    branches: [main]
+    types: [opened, synchronize, reopened]
+
+env:
+  PYTHON_VERSION: "3.11"
+  NODE_VERSION: "18"
 
 jobs:
-  backend-lint-test:
+  backend-lint:
+    name: "🔍 Backend — Lint & Type Check"
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
     steps:
       - uses: actions/checkout@v4
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
-      - name: Install backend deps
-        run: |
-          cd backend
-          pip install -r requirements.txt
-          pip install pytest ruff
-      - name: Lint backend
-        run: ruff check backend/
-      - name: Run backend tests
-        run: pytest backend/tests/ -v
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+      - name: Install dependencies
+        run: pip install -r requirements.txt ruff mypy
+      - name: Ruff lint
+        run: ruff check . --output-format=github
+      - name: MyPy type check
+        run: mypy . --ignore-missing-imports --strict
 
-  frontend-lint-build:
+  backend-test:
+    name: "🧪 Backend — Unit Tests"
     runs-on: ubuntu-latest
+    needs: backend-lint
+    defaults:
+      run:
+        working-directory: backend
     steps:
       - uses: actions/checkout@v4
-      - name: Setup Node
-        uses: actions/setup-node@v4
+      - uses: actions/setup-python@v5
         with:
-          node-version: "20"
-          cache: "npm"
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+      - name: Install dependencies
+        run: pip install -r requirements.txt pytest pytest-asyncio pytest-cov httpx
+      - name: Download checkpatch.pl
+        run: |
+          mkdir -p ../tools
+          curl -s https://raw.githubusercontent.com/torvalds/linux/master/scripts/checkpatch.pl \
+            -o ../tools/checkpatch.pl
+          chmod +x ../tools/checkpatch.pl
+      - name: Run tests with coverage
+        run: |
+          pytest tests/ -v \
+            --cov=. \
+            --cov-report=xml \
+            --cov-report=term-missing \
+            --asyncio-mode=auto
+        env:
+          TESTING: "true"
+          LLM_PROVIDER: "mock"
+      - name: Upload coverage
+        uses: codecov/codecov-action@v4
+        with:
+          file: backend/coverage.xml
+          flags: backend
+
+  patchwise-skill-test:
+    name: "🛠️ PatchWise Skill — Integration Tests"
+    runs-on: ubuntu-latest
+    needs: backend-test
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+      - name: Install dependencies
+        run: pip install -r requirements.txt pytest pytest-asyncio
+      - name: Install perl (for checkpatch)
+        run: sudo apt-get install -y perl
+      - name: Download checkpatch.pl
+        run: |
+          mkdir -p ../tools
+          curl -s https://raw.githubusercontent.com/torvalds/linux/master/scripts/checkpatch.pl \
+            -o ../tools/checkpatch.pl
+          chmod +x ../tools/checkpatch.pl
+      - name: Run PatchWise skill tests
+        run: |
+          pytest tests/test_patchwise_skill.py -v \
+            --asyncio-mode=auto
+        env:
+          TESTING: "true"
+
+  frontend-lint:
+    name: "🎨 Frontend — Lint & Type Check"
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
           cache-dependency-path: frontend/package-lock.json
-      - name: Install frontend deps
-        run: |
-          cd frontend
-          npm ci
-      - name: Lint frontend
-        run: |
-          cd frontend
-          npm run lint
-      - name: Build frontend
-        run: |
-          cd frontend
-          npm run build
+      - name: Install dependencies
+        run: npm ci
+      - name: ESLint
+        run: npm run lint
+      - name: TypeScript check
+        run: npm run type-check
 
-  integration-check:
-    needs: [backend-lint-test, frontend-lint-build]
+  frontend-test:
+    name: "🧪 Frontend — Unit Tests"
     runs-on: ubuntu-latest
+    needs: frontend-lint
+    defaults:
+      run:
+        working-directory: frontend
     steps:
       - uses: actions/checkout@v4
-      - name: Check API contract
-        run: echo "API contract check passed — extend with Pact tests in Phase 3"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Install dependencies
+        run: npm ci
+      - name: Run tests
+        run: npm run test -- --coverage --watchAll=false
+      - name: Upload coverage
+        uses: codecov/codecov-action@v4
+        with:
+          file: frontend/coverage/lcov.info
+          flags: frontend
+
+  frontend-build:
+    name: "🏗️ Frontend — Build"
+    runs-on: ubuntu-latest
+    needs: frontend-test
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Install dependencies
+        run: npm ci
+      - name: Build
+        run: npm run build
+        env:
+          CI: false
+
+  docker-build:
+    name: "🐳 Docker — Build Validation"
+    runs-on: ubuntu-latest
+    needs: [backend-test, frontend-build]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build backend image
+        run: docker build -f Dockerfile -t patchwise-backend:ci .
+      - name: Build frontend image
+        run: docker build -f Dockerfile.frontend -t patchwise-frontend:ci .
+      - name: Validate docker-compose
+        run: docker compose config
+
+  e2e-agent-loop:
+    name: "🤖 E2E — Agent Loop Validation"
+    runs-on: ubuntu-latest
+    needs: docker-build
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - name: Start services
+        run: |
+          cp .env.example .env
+          echo "LLM_PROVIDER=mock" >> .env
+          docker compose up -d
+          sleep 10
+      - name: Run E2E agent loop test
+        run: |
+          pip install httpx pytest pytest-asyncio
+          pytest tests/e2e/test_agent_loop.py -v \
+            --asyncio-mode=auto
+      - name: Dump logs on failure
+        if: failure()
+        run: docker compose logs
+      - name: Teardown
+        if: always()
+        run: docker compose down -v
+
+  ci-gate:
+    name: "✅ CI Gate — All Checks Passed"
+    runs-on: ubuntu-latest
+    needs:
+      - backend-test
+      - patchwise-skill-test
+      - frontend-build
+      - docker-build
+    steps:
+      - name: All checks passed
+        run: echo "✅ All PatchWise CI checks passed — safe to merge!"
