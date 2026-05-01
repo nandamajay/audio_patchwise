@@ -26,6 +26,15 @@ def submit_patch(payload: PatchSubmitRequest) -> PatchResponse:
     if payload.session_id in SESSION_STORE:
         SESSION_STORE[payload.session_id]["patch_input"] = payload.patch_input
         SESSION_STORE[payload.session_id]["current_patch"] = payload.patch_input
+        SESSION_STORE[payload.session_id]["current_fixed_patch"] = None
+        SESSION_STORE[payload.session_id]["touched_lines"] = []
+        shared = SESSION_STORE[payload.session_id].get("shared_a2a_context")
+        if isinstance(shared, dict):
+            shared["original_patch"] = payload.patch_input
+            shared["current_patch"] = payload.patch_input
+            shared["touched_lines"] = []
+            shared["impact_radius"] = {}
+            shared["lgtm"] = False
 
     if session_manager:
         session_manager.update_session(

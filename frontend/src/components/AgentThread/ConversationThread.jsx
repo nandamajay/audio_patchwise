@@ -1,8 +1,16 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import AgentBubble from "../agents/AgentBubble";
+import { ImpactMap, TimeoutSlider } from "../ConversationThread";
 
-export default function ConversationThread({ messages }) {
+export default function ConversationThread({
+  messages,
+  impactRadius = null,
+  touchedLines = [],
+  challengeTimeout = 60,
+  onTimeoutChange = () => undefined,
+  getNegotiationThread = () => [],
+}) {
   const topRef = useRef(null);
   const bottomRef = useRef(null);
   const [showNav, setShowNav] = useState(false);
@@ -26,16 +34,27 @@ export default function ConversationThread({ messages }) {
 
   return (
     <div style={{ position: "relative" }}>
+      {impactRadius ? (
+        <ImpactMap impactRadius={impactRadius} touchedLines={touchedLines} />
+      ) : null}
       <div ref={topRef} />
       {grouped.map(([round, roundMessages]) => (
         <div key={`round-${round}`}>
           <div className="round-divider">ROUND {round}</div>
           {roundMessages.map((message) => (
-            <AgentBubble key={message.id} message={message} />
+            <AgentBubble
+              key={message.id}
+              message={message}
+              getNegotiationThread={getNegotiationThread}
+            />
           ))}
         </div>
       ))}
       <div ref={bottomRef} />
+
+      <div style={{ marginTop: 8, marginBottom: 10 }}>
+        <TimeoutSlider value={challengeTimeout} onChange={onTimeoutChange} />
+      </div>
 
       {showNav ? (
         <div className="thread-nav-buttons">

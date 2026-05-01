@@ -36,3 +36,10 @@ class PatchWiseState(TypedDict):
     messages: Annotated[list[dict], add_messages]
     # Runtime-only callback used for websocket streaming from agent nodes.
     _stream_callback: NotRequired[Callable[[dict[str, Any]], None]]
+    current_fixed_patch: NotRequired[str | None]
+    touched_lines: NotRequired[list[int]]
+    shared_a2a_context: NotRequired[dict[str, Any]]
+    a2a_messages: NotRequired[list[dict[str, Any]]]
+    review_type: NotRequired[str]
+    review_scope_lines: NotRequired[list[int]]
+    challenge_timeout: NotRequired[int]

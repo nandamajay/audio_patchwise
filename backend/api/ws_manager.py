@@ -30,3 +30,44 @@ class WebSocketManager:
 
 
 websocket_manager = WebSocketManager()
+
+
+# True A2A event schemas used by frontend hook consumers.
+EVENT_SCHEMAS = {
+    "a2a_message": {
+        "sender": str,
+        "receiver": str,
+        "type": str,
+        "content": str,
+        "metadata": dict,
+        "issue_id": str,
+        "round": int,
+        "confidence": float,
+        "message_id": str,
+        "timestamp": str,
+    },
+    "impact_map_update": {
+        "session_id": str,
+        "touched_lines": list,
+        "impact_radius": {
+            "direct": list,
+            "downstream": list,
+            "upstream": list,
+            "cross_file": list,
+            "impact_chain": list,
+        },
+    },
+    "arbitration_required": {
+        "session_id": str,
+        "issue_id": str,
+        "chanakya_position": str,
+        "aryabhata_position": str,
+        "evidence_summary": dict,
+    },
+    "surgical_review_start": {
+        "session_id": str,
+        "scope_lines": list,
+        "scope_reason": str,
+        "round": int,
+    },
+}

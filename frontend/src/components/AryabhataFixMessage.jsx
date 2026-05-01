@@ -6,6 +6,7 @@ export const AryabhataFixMessage = ({ message, onFeedback = () => undefined }) =
   const [expandedFix, setExpandedFix] = useState(null);
   const [showFullDiff, setShowFullDiff] = useState(false);
   const [showJustification, setShowJustification] = useState(false);
+  const [showFixedPatch, setShowFixedPatch] = useState(false);
 
   const fixes = message.fix_summary || [];
   const diff = message.diff_from_previous || "";
@@ -86,10 +87,34 @@ export const AryabhataFixMessage = ({ message, onFeedback = () => undefined }) =
         <button type="button" className="btn secondary" onClick={() => setShowFullDiff((prev) => !prev)}>
           {showFullDiff ? "Hide Full Patch Diff" : "View Full Patch Diff"}
         </button>
+        <button type="button" className="btn secondary" onClick={() => setShowFixedPatch((prev) => !prev)}>
+          {showFixedPatch ? "Hide Fixed Patch" : "Show Fixed Patch"}
+        </button>
         <button type="button" className="btn secondary" onClick={() => setShowJustification((prev) => !prev)}>
           {showJustification ? "Hide Justification" : "Show Justification"}
         </button>
       </div>
+
+      {showFixedPatch && message.fixed_patch ? (
+        <div
+          style={{
+            marginTop: "8px",
+            fontFamily: "monospace",
+            fontSize: "11px",
+            background: "rgba(0,0,0,0.45)",
+            padding: "12px",
+            borderRadius: "6px",
+            maxHeight: "240px",
+            overflow: "auto",
+            whiteSpace: "pre-wrap",
+            color: "#c4b5fd",
+          }}
+        >
+          {"<<<FIXED_PATCH_START>>>\n"}
+          {message.fixed_patch}
+          {"\n<<<FIXED_PATCH_END>>>"}
+        </div>
+      ) : null}
 
       {showFullDiff && diff ? (
         <div

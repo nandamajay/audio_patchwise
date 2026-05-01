@@ -278,6 +278,15 @@ def aryabhata_fix_node(state: dict[str, Any]) -> dict[str, Any]:
         }
         for issue in review_issues
     ]
+    touched_values: list[int] = []
+    for change in changes_made:
+        try:
+            line = int(change.get("line", 0) or 0)
+        except Exception:
+            continue
+        if line > 0:
+            touched_values.append(line)
+    touched_lines = sorted(set(touched_values))
 
     fix_summary = [
         {
@@ -335,6 +344,32 @@ def aryabhata_fix_node(state: dict[str, Any]) -> dict[str, Any]:
     _emit(
         state,
         {
+            "agent": "system",
+            "type": "a2a_message",
+            "round": round_id,
+            "content": f"ARYABHATA proposed fixes for {len(fix_summary)} issue(s).",
+            "metadata": {
+                "sender": "ARYABHATA",
+                "receiver": "CHANAKYA",
+                "type": "FIX_PROPOSAL",
+                "content": f"Round {round_id} fix proposal",
+                "issue_id": None,
+                "round": round_id,
+                "confidence": None,
+                "message_id": f"fix-{round_id:03d}",
+                "timestamp": "",
+                "metadata": {
+                    "changes_made": changes_made,
+                    "touched_lines": touched_lines,
+                    "validation_passed": bool(fix_result.validation_result.get("passed", False)),
+                },
+            },
+        },
+    )
+
+    _emit(
+        state,
+        {
             "agent": "aryabhata",
             "type": "aryabhata_fix",
             "round": round_id,
@@ -359,6 +394,16 @@ def aryabhata_fix_node(state: dict[str, Any]) -> dict[str, Any]:
     )
 
     state["current_patch"] = fix_result.fixed_patch
+    state["current_fixed_patch"] = fix_result.fixed_patch
+    state["touched_lines"] = touched_lines
+    shared_ctx = state.get("shared_a2a_context")
+    if isinstance(shared_ctx, dict):
+        shared_ctx["touched_lines"] = touched_lines
+        shared_ctx["aryabhata_fix_result"] = {
+            "validation_passed": bool(fix_result.validation_result.get("passed", False)),
+            "changes_made": changes_made,
+        }
+        state["shared_a2a_context"] = shared_ctx
     _ensure_list(state, "fix_history").append(
         {
             "round": round_id,

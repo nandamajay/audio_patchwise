@@ -5,8 +5,10 @@ export function useMonacoDiff(containerRef, options) {
   const editorRef = useRef(null);
   const originalModelRef = useRef(null);
   const modifiedModelRef = useRef(null);
+  const isMountedRef = useRef(true);
 
   useEffect(() => {
+    isMountedRef.current = true;
     if (!containerRef.current) return undefined;
 
     const originalModel = monaco.editor.createModel(
@@ -27,19 +29,27 @@ export function useMonacoDiff(containerRef, options) {
       renderSideBySide: true,
       automaticLayout: true,
       minimap: { enabled: false },
-      fontSize: 12,
+      fontSize: 13,
+      fontFamily: "'JetBrains Mono', 'Fira Code', monospace",
+      lineNumbers: "on",
+      diffCodeLens: true,
+      ignoreTrimWhitespace: false,
       scrollBeyondLastLine: false,
     });
 
-    editor.setModel({
-      original: originalModel,
-      modified: modifiedModel,
-    });
+    if (isMountedRef.current) {
+      editor.setModel({
+        original: originalModel,
+        modified: modifiedModel,
+      });
+    }
     editorRef.current = editor;
 
     return () => {
+      isMountedRef.current = false;
       if (editorRef.current) {
         try {
+          // Critical order: detach models before disposing editor.
           editorRef.current.setModel(null);
         } catch {
           // no-op
@@ -77,6 +87,7 @@ export function useMonacoDiff(containerRef, options) {
   }, []);
 
   useEffect(() => {
+    if (!isMountedRef.current) return;
     if (originalModelRef.current && !originalModelRef.current.isDisposed()) {
       originalModelRef.current.setValue(options.originalContent || "");
     }

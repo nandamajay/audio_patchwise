@@ -8,8 +8,10 @@ import RoundTracker from "../components/controls/RoundTracker";
 import SessionHistory from "../components/SessionHistory/SessionHistory";
 import GlassCard from "../components/layout/GlassCard";
 import useAgentStream from "../hooks/useAgentStream";
+import { useA2A } from "../hooks/useA2A";
 import useInterrupt from "../hooks/useInterrupt";
 import useSessionStore from "../store/sessionStore";
+import ArbitrationModal from "../components/ArbitrationModal";
 
 export default function ConversationThread() {
   const {
@@ -27,6 +29,16 @@ export default function ConversationThread() {
 
   const { sendEvent } = useAgentStream(sessionId);
   const { isPaused, isAborted, hint, setHint, sendInterrupt, sendResume, sendAbort } = useInterrupt(sessionId, sendEvent);
+  const {
+    impactRadius,
+    arbitrationPending,
+    arbitrationData,
+    challengeTimeout,
+    surgicalScope,
+    resolveArbitration,
+    updateChallengeTimeout,
+    getNegotiationThread,
+  } = useA2A(sessionId);
 
   useEffect(() => {
     fetchSessions();
@@ -53,7 +65,14 @@ export default function ConversationThread() {
           </div>
         ) : null}
 
-        <ThreadView messages={messages} />
+        <ThreadView
+          messages={messages}
+          impactRadius={impactRadius}
+          touchedLines={surgicalScope || []}
+          challengeTimeout={challengeTimeout}
+          onTimeoutChange={updateChallengeTimeout}
+          getNegotiationThread={getNegotiationThread}
+        />
 
         {verdict === "LGTM" ? (
           <div className="lgtm-banner">✅ LGTM — CHANAKYA approves the patch!</div>
@@ -99,6 +118,10 @@ export default function ConversationThread() {
           <p style={{ marginTop: 8 }}>{qualityScore.toFixed(0)} / 100</p>
         </GlassCard>
       </div>
+
+      {arbitrationPending && arbitrationData ? (
+        <ArbitrationModal data={arbitrationData} onDecide={resolveArbitration} />
+      ) : null}
     </div>
   );
 }

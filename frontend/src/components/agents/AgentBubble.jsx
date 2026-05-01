@@ -9,6 +9,7 @@ import AryabhataFixMessage from "../AryabhataFixMessage";
 import FeedbackButtons from "../FeedbackButtons";
 import ReviewIssueCard from "../ReviewIssueCard";
 import ThoughtChainTree from "../ThoughtChainTree";
+import { NegotiationThread } from "../ConversationThread";
 
 const badgeTone = {
   CRITICAL: "danger",
@@ -16,7 +17,11 @@ const badgeTone = {
   INFO: "default",
 };
 
-export default function AgentBubble({ message, sessionId }) {
+export default function AgentBubble({
+  message,
+  sessionId,
+  getNegotiationThread = () => [],
+}) {
   const isSystem = message.agent === "system";
   const isChanakya = message.agent === "chanakya";
   const sideClass = isSystem ? "left" : isChanakya ? "left" : "right";
@@ -74,6 +79,13 @@ export default function AgentBubble({ message, sessionId }) {
                 previous_round: message.metadata.first_seen || null,
               }
             }
+          />
+        ) : null}
+
+        {message.type === "finding" && message.metadata?.issue_id ? (
+          <NegotiationThread
+            issueId={message.metadata.issue_id}
+            thread={getNegotiationThread(message.metadata.issue_id)}
           />
         ) : null}
 

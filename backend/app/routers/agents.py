@@ -35,6 +35,8 @@ def _normalize_state(state: dict) -> dict:
         "messages",
         "fix_history",
         "current_issues",
+        "a2a_messages",
+        "touched_lines",
     ):
         if not isinstance(state.get(key), list):
             state[key] = []
@@ -60,6 +62,11 @@ def _normalize_state(state: dict) -> dict:
         current_patch = patch_input
     state["current_patch"] = current_patch
 
+    current_fixed_patch = state.get("current_fixed_patch")
+    if current_fixed_patch is not None and not isinstance(current_fixed_patch, str):
+        current_fixed_patch = str(current_fixed_patch)
+    state["current_fixed_patch"] = current_fixed_patch
+
     max_rounds = state.get("max_rounds", 5)
     if not isinstance(max_rounds, int) or max_rounds <= 0:
         max_rounds = 5
@@ -74,6 +81,28 @@ def _normalize_state(state: dict) -> dict:
         state["llm_provider"] = "qgenie"
     if not state.get("llm_model"):
         state["llm_model"] = "gpt-4o"
+    challenge_timeout = state.get("challenge_timeout", 60)
+    if not isinstance(challenge_timeout, int) or challenge_timeout < 10:
+        challenge_timeout = 60
+    state["challenge_timeout"] = challenge_timeout
+
+    shared = state.get("shared_a2a_context")
+    if not isinstance(shared, dict):
+        shared = {}
+    shared.setdefault("session_id", state.get("session_id", ""))
+    shared.setdefault("original_patch", patch_input)
+    shared.setdefault("current_patch", current_patch)
+    shared.setdefault("round_number", state["current_round"])
+    shared.setdefault("negotiation_threads", {})
+    shared.setdefault("all_messages", [])
+    shared.setdefault("touched_lines", state.get("touched_lines", []))
+    shared.setdefault("impact_radius", {})
+    shared.setdefault("chanakya_knowledge", {})
+    shared.setdefault("aryabhata_fix_result", None)
+    shared.setdefault("user_arbitration_pending", False)
+    shared.setdefault("lgtm", False)
+    shared.setdefault("challenge_timeout", challenge_timeout)
+    state["shared_a2a_context"] = shared
     return state
 
 
@@ -137,6 +166,10 @@ def _execute_review_cycle_sync(state: dict) -> dict:
     while True:
         state = asyncio.run(chanakya_review_node(state))
         state = _normalize_state(state)
+
+        shared = state.get("shared_a2a_context")
+        if isinstance(shared, dict) and shared.get("user_arbitration_pending"):
+            return state
 
         if state.get("verdict") == "LGTM":
             return state
@@ -319,6 +352,49 @@ async def agent_stream(websocket: WebSocket, session_id: str) -> None:
                     running = RUN_TASKS.get(session_id)
                     if running is None or running.done():
                         RUN_TASKS[session_id] = asyncio.create_task(run_agent_loop(session_id))
+            elif msg_type == "update_config":
+                if session_id in SESSION_STORE:
+                    seconds = data.get("challenge_timeout")
+                    try:
+                        seconds = int(seconds)
+                    except Exception:
+                        seconds = None
+                    if isinstance(seconds, int) and 10 <= seconds <= 300:
+                        SESSION_STORE[session_id]["challenge_timeout"] = seconds
+                        shared = SESSION_STORE[session_id].get("shared_a2a_context")
+                        if isinstance(shared, dict):
+                            shared["challenge_timeout"] = seconds
+                        await connection_manager.broadcast(
+                            session_id,
+                            {
+                                "agent": "system",
+                                "type": "config_update",
+                                "round": SESSION_STORE[session_id].get("current_round", 1),
+                                "content": f"Challenge timeout updated to {seconds}s.",
+                                "metadata": {"challenge_timeout": seconds},
+                            },
+                        )
+            elif msg_type == "arbitration_decision":
+                if session_id in SESSION_STORE:
+                    issue_id = data.get("issue_id")
+                    decision = data.get("decision")
+                    shared = SESSION_STORE[session_id].get("shared_a2a_context")
+                    if isinstance(shared, dict):
+                        shared["user_arbitration_pending"] = False
+                        shared["last_arbitration_decision"] = {
+                            "issue_id": issue_id,
+                            "decision": decision,
+                        }
+                    await connection_manager.broadcast(
+                        session_id,
+                        {
+                            "agent": "system",
+                            "type": "arbitration_resolved",
+                            "round": SESSION_STORE[session_id].get("current_round", 1),
+                            "content": f"Arbitration resolved for issue {issue_id}: {decision}",
+                            "metadata": {"issue_id": issue_id, "decision": decision},
+                        },
+                    )
             else:
                 await connection_manager.broadcast(
                     session_id,
