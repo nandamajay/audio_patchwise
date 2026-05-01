@@ -55,6 +55,60 @@ class SQLiteStore:
                     )
                     """
                 )
+            self._repair_legacy_session_foreign_keys(conn)
+
+    def _repair_legacy_session_foreign_keys(self, conn: sqlite3.Connection) -> None:
+        """
+        Repair legacy tables that still reference sessions(id) from older schema versions.
+        Current primary key is sessions(session_id), and foreign key mismatch causes
+        POST /api/session/start to fail with sqlite3.OperationalError.
+        """
+        legacy_ref = "REFERENCES sessions(id)"
+        fixed_ref = "REFERENCES sessions(session_id)"
+
+        rows = conn.execute(
+            """
+            SELECT name, sql
+            FROM sqlite_master
+            WHERE type = 'table'
+              AND name NOT LIKE 'sqlite_%'
+            """
+        ).fetchall()
+
+        to_rebuild: list[tuple[str, str]] = []
+        for row in rows:
+            name = row["name"] if isinstance(row, sqlite3.Row) else row[0]
+            sql = row["sql"] if isinstance(row, sqlite3.Row) else row[1]
+            if sql and legacy_ref in sql:
+                to_rebuild.append((name, sql))
+
+        if not to_rebuild:
+            return
+
+        conn.execute("PRAGMA foreign_keys=OFF")
+        try:
+            for table_name, create_sql in to_rebuild:
+                temp_name = f"{table_name}__fkfix"
+                rewritten = create_sql.replace(legacy_ref, fixed_ref)
+                rewritten = rewritten.replace(
+                    f"CREATE TABLE {table_name}",
+                    f"CREATE TABLE {temp_name}",
+                    1,
+                )
+
+                conn.execute(rewritten)
+
+                cols = conn.execute(f"PRAGMA table_info({table_name})").fetchall()
+                col_names = [col["name"] if isinstance(col, sqlite3.Row) else col[1] for col in cols]
+                quoted = ", ".join([f'"{col}"' for col in col_names])
+
+                conn.execute(
+                    f'INSERT INTO "{temp_name}" ({quoted}) SELECT {quoted} FROM "{table_name}"'
+                )
+                conn.execute(f'DROP TABLE "{table_name}"')
+                conn.execute(f'ALTER TABLE "{temp_name}" RENAME TO "{table_name}"')
+        finally:
+            conn.execute("PRAGMA foreign_keys=ON")
 
     def save_session(self, snapshot: dict) -> None:
         conn = self._get_conn()
