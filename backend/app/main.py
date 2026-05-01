@@ -7,13 +7,48 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
 from app.routers import agents, interrupt, output, patch, session, settings
-from database import init_db
-from knowledge.chroma_manager import start_write_worker
-from routes import scheduler_routes
-from scheduler import scheduler, start_scheduler
 from startup_recovery import run_startup_recovery
 
 logger = logging.getLogger(__name__)
+
+
+try:
+    from database import init_db
+except Exception:
+    from app.db.database import Base, engine
+
+    def init_db():
+        Base.metadata.create_all(bind=engine)
+
+
+try:
+    from knowledge.chroma_manager import start_write_worker
+except Exception:
+
+    async def start_write_worker():
+        return None
+
+
+try:
+    from routes import scheduler_routes
+except Exception:
+    scheduler_routes = None
+
+
+try:
+    from scheduler import scheduler, start_scheduler
+except Exception:
+
+    class _NoopScheduler:
+        running = False
+
+        def shutdown(self):
+            return None
+
+    scheduler = _NoopScheduler()
+
+    def start_scheduler(_preset: str):
+        return None
 
 
 @asynccontextmanager
@@ -29,7 +64,7 @@ async def lifespan(app: FastAPI):
     except Exception as exc:
         logger.warning("[PatchWise] Startup recovery failed: %s", exc)
 
-    if not any(route.path.startswith("/api/scheduler") for route in app.routes):
+    if scheduler_routes and not any(route.path.startswith("/api/scheduler") for route in app.routes):
         app.include_router(scheduler_routes.router)
 
     logger.info("[PatchWise] All services started - ready for concurrent users")

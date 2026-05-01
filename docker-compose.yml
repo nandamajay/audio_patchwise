@@ -57,6 +57,7 @@ services:
       - LKML_MAILING_LISTS=${LKML_MAILING_LISTS:-alsa-devel,linux-sound}
       - SQLITE_PATH=/workspace/data/db/patchwise.db
       - SQLITE_DB_PATH=/workspace/data/db/patchwise.db
+      - PATCHWISE_DB_URL=sqlite:////workspace/data/db/patchwise.db
       - CHROMADB_PATH=/workspace/data/chromadb
       - PATCHES_PATH=/workspace/data/patches
       - PROFILES_PATH=/workspace/data/profiles
