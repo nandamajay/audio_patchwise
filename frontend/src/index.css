@@ -258,3 +258,62 @@ button {
   font-size: 12px;
   color: var(--text-muted);
 }
+
+.file-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  background: var(--glass-bg);
+  border: 1px solid var(--glass-border);
+  border-radius: 999px;
+  padding: 6px 10px;
+}
+
+.file-chip button {
+  border: none;
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+
+.file-size {
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.badge.recurring {
+  color: #ffd27f;
+  border-color: rgba(255, 210, 127, 0.4);
+}
+
+.badge.auto-detected {
+  color: #7fffd4;
+  border-color: rgba(127, 255, 212, 0.35);
+}
+
+.thread-nav-buttons {
+  position: fixed;
+  bottom: 90px;
+  right: 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  z-index: 100;
+}
+
+.nav-btn.glass {
+  background: var(--glass-bg);
+  backdrop-filter: blur(12px);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  color: white;
+  padding: 8px 14px;
+  border-radius: 20px;
+  cursor: pointer;
+  font-size: 12px;
+  transition: all 0.2s;
+}
+
+.nav-btn.glass:hover {
+  background: var(--accent-blue);
+  transform: scale(1.05);
+}

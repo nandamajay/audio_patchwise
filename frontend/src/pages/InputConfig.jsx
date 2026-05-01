@@ -3,6 +3,8 @@ import { useNavigate } from "react-router-dom";
 
 import AryabhataAvatar from "../components/agents/AryabhataAvatar";
 import ChanakyaAvatar from "../components/agents/ChanakyaAvatar";
+import ContextBox from "../components/InputPanel/ContextBox";
+import PatchUpload from "../components/InputPanel/PatchUpload";
 import LLMDropdown from "../components/controls/LLMDropdown";
 import GlassCard from "../components/layout/GlassCard";
 import GradientHeader from "../components/layout/GradientHeader";
@@ -63,37 +65,19 @@ export default function InputConfig() {
         </GlassCard>
       </div>
 
+      <PatchUpload onPatchLoaded={(value) => setField("patchInput", value)} />
       <PatchInput value={patchInput} onChange={(value) => setField("patchInput", value)} />
 
       <div className="grid grid-2">
-        <GlassCard>
-          <h3 style={{ marginBottom: 10 }}>Context</h3>
-          <div className="grid" style={{ gap: 8 }}>
-            <input
-              className="input"
-              value={kernelVersion}
-              placeholder="Kernel version"
-              onChange={(event) => setField("kernelVersion", event.target.value)}
-            />
-            <input
-              className="input"
-              value={subsystem}
-              placeholder="Subsystem"
-              onChange={(event) => setField("subsystem", event.target.value)}
-            />
-            <input
-              className="input"
-              value={sourcePath}
-              placeholder="source path"
-              onChange={(event) => setField("sourcePath", event.target.value)}
-            />
-          </div>
-          {missingContext.length ? (
-            <p className="small" style={{ marginTop: 10 }}>
-              CHANAKYA needs more context: {missingContext.join(", ")}.
-            </p>
-          ) : null}
-        </GlassCard>
+        <ContextBox
+          patchContent={patchInput}
+          value={{ subsystem, kernelVersion, sourcePath, notes: "" }}
+          onChange={(data) => {
+            setField("subsystem", data.subsystem || "");
+            setField("kernelVersion", data.kernelVersion || "");
+            setField("sourcePath", data.sourcePath || "");
+          }}
+        />
 
         <GlassCard>
           <h3 style={{ marginBottom: 10 }}>Configuration</h3>
@@ -103,18 +87,12 @@ export default function InputConfig() {
             <input
               type="range"
               min="1"
-              max="5"
+              max="10"
               value={maxRounds}
               onChange={(event) => setField("maxRounds", Number(event.target.value))}
             />
             <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-              {[
-                "Style",
-                "Logic",
-                "Memory",
-                "LKML",
-                "Commit Msg",
-              ].map((focus) => (
+              {["Style", "Logic", "Memory", "LKML", "Commit Msg"].map((focus) => (
                 <label key={focus} className="badge">
                   <input type="checkbox" defaultChecked />
                   {focus}
@@ -122,6 +100,11 @@ export default function InputConfig() {
               ))}
             </div>
           </div>
+          {missingContext.length ? (
+            <p className="small" style={{ marginTop: 10 }}>
+              CHANAKYA needs more context: {missingContext.join(", ")}.
+            </p>
+          ) : null}
         </GlassCard>
       </div>
 

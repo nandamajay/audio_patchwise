@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 from typing import Any
 
 from app.agents.state import PatchWiseState
@@ -12,8 +13,55 @@ CHANAKYA_SYSTEM_PROMPT = (
     "precision of a senior LKML maintainer. You question everything, miss "
     "nothing, and reference historical patches to strengthen your review. "
     "You review: coding style, logic correctness, memory/resource safety, "
-    "LKML compliance, and commit message quality."
+    "LKML compliance, and commit message quality. If you encounter the same "
+    "issue in a subsequent round that was supposedly fixed by ARYABHATA, "
+    "explicitly call it out as a RECURRING ISSUE with the round number it first appeared."
 )
+
+
+@dataclass
+class IssueHistory:
+    count: int
+    first_round: int
+    last_round: int
+    status: str = "open"
+
+
+@dataclass
+class IssueTracker:
+    issue_history: dict[str, IssueHistory] = field(default_factory=dict)
+
+    def track(self, issue_id: str, round_num: int) -> None:
+        if issue_id not in self.issue_history:
+            self.issue_history[issue_id] = IssueHistory(
+                count=1,
+                first_round=round_num,
+                last_round=round_num,
+            )
+        else:
+            history = self.issue_history[issue_id]
+            history.count += 1
+            history.last_round = round_num
+
+    def is_recurring(self, issue_id: str) -> bool:
+        return self.issue_history.get(issue_id, IssueHistory(0, 0, 0)).count > 1
+
+    def get_recurrence_note(self, issue_id: str) -> str:
+        history = self.issue_history.get(issue_id)
+        if history and history.count > 1:
+            return (
+                f"⚠️ RECURRING ISSUE (seen {history.count} times, "
+                f"first in Round {history.first_round}) — "
+                "ARYABHATA's previous fix did NOT resolve this."
+            )
+        return ""
+
+    def first_round(self, issue_id: str) -> int | None:
+        history = self.issue_history.get(issue_id)
+        return history.first_round if history else None
+
+
+_ISSUE_TRACKERS: dict[str, IssueTracker] = {}
 
 
 def _emit(state: dict[str, Any], payload: dict[str, Any]) -> None:
@@ -43,10 +91,17 @@ def _emit_tokens(
         )
 
 
+def _issue_id(issue: dict[str, Any]) -> str:
+    return f"{issue.get('issue_type','UNK')}:{issue.get('line_number','?')}:{issue.get('description','')[:80]}"
+
+
 def chanakya_review_node(state: PatchWiseState) -> PatchWiseState:
     round_id = state.get("current_round", 1)
     patch_text = state.get("current_patch") or state.get("patch_input", "")
     source_context = state.get("source_path", "")
+    session_id = state.get("session_id", "default")
+
+    tracker = _ISSUE_TRACKERS.setdefault(session_id, IssueTracker())
 
     hint = state.get("interrupt_hint")
     thinking = "Analyzing style, logic, memory safety, LKML compliance, and commit quality."
@@ -67,6 +122,13 @@ def chanakya_review_node(state: PatchWiseState) -> PatchWiseState:
     for bucket, items in analyses.items():
         for issue in items:
             issue["issue_type"] = issue_map[bucket]
+            issue_id = _issue_id(issue)
+            tracker.track(issue_id, round_id)
+            recurring = tracker.is_recurring(issue_id)
+            issue["issue_id"] = issue_id
+            issue["recurring"] = recurring
+            issue["first_seen"] = tracker.first_round(issue_id)
+            issue["recurrence_note"] = tracker.get_recurrence_note(issue_id)
             findings.append(issue)
 
     search_skill = SearchSkill()
@@ -78,19 +140,30 @@ def chanakya_review_node(state: PatchWiseState) -> PatchWiseState:
 
     for finding in findings:
         finding["similar_patch_refs"] = similar_refs[:2]
+        message = finding["description"]
+        if finding.get("recurring"):
+            message = (
+                f"⚠️ This issue was flagged in Round {finding.get('first_seen')} and the fix applied by "
+                f"ARYABHATA did NOT resolve it. {finding['description']}"
+            )
+
         _emit(
             state,
             {
                 "agent": "chanakya",
                 "type": "finding",
                 "round": round_id,
-                "content": finding["description"],
+                "content": message,
                 "metadata": {
                     "issue_type": finding["issue_type"],
                     "severity": finding["severity"],
                     "line_number": finding["line_number"],
                     "suggestion": finding["suggestion"],
                     "similar_patch_refs": finding["similar_patch_refs"],
+                    "issue_id": finding["issue_id"],
+                    "recurring": finding["recurring"],
+                    "first_seen": finding.get("first_seen"),
+                    "recurrence_note": finding.get("recurrence_note", ""),
                 },
             },
         )

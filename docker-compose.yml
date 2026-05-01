@@ -1,52 +1,42 @@
 version: "3.9"
 
 services:
-  backend:
+  patchwise:
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: patchwise_backend
-    env_file:
-      - .env
-    volumes:
-      - ./backend:/app
-      - ./data/chromadb:/app/data/chromadb
-      - ./data/sqlite:/app/data/sqlite
-      - ./logs:/app/logs
+    container_name: patchwise_app
     ports:
-      - "${BACKEND_PORT:-8000}:8000"
-    depends_on:
-      - chromadb
+      - "${APP_PORT:-7000}:${APP_PORT:-7000}"
+    environment:
+      - APP_PORT=${APP_PORT:-7000}
+      - LLM_PROVIDER=${LLM_PROVIDER:-openai}
+      - LLM_API_KEY=${LLM_API_KEY:-}
+      - LLM_MODEL=${LLM_MODEL:-gpt-4o}
+      - CHANAKYA_MAX_ROUNDS=${CHANAKYA_MAX_ROUNDS:-5}
+      - SUBSYSTEM=${SUBSYSTEM:-audio}
+      - LKML_PRESEEDED=${LKML_PRESEEDED:-false}
+      - GITHUB_TOKEN=${GITHUB_TOKEN:-}
+      - GERRIT_URL=${GERRIT_URL:-}
+      - GERRIT_USERNAME=${GERRIT_USERNAME:-}
+      - GERRIT_PASSWORD=${GERRIT_PASSWORD:-}
+      - SMTP_HOST=${SMTP_HOST:-localhost}
+      - NOTIFY_EMAIL=${NOTIFY_EMAIL:-nandam@qti.qualcomm.com}
+    volumes:
+      - patchwise_chromadb:/app/data/chromadb
+      - patchwise_sqlite:/app/data/sqlite
+      - patchwise_patches:/app/data/patches
+      - patchwise_logs:/app/logs
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-
-  frontend:
-    build:
-      context: .
-      dockerfile: Dockerfile.frontend
-    container_name: patchwise_frontend
-    env_file:
-      - .env
-    ports:
-      - "${FRONTEND_PORT:-3000}:3000"
-    depends_on:
-      backend:
-        condition: service_healthy
-    restart: unless-stopped
-
-  chromadb:
-    image: chromadb/chroma:latest
-    container_name: patchwise_chromadb
-    ports:
-      - "8001:8000"
-    volumes:
-      - ./data/chromadb:/chroma/chroma
-    restart: unless-stopped
+      test: ["CMD", "curl", "-f", "http://localhost:${APP_PORT:-7000}/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
 
 volumes:
-  chromadb_data:
-  sqlite_data:
+  patchwise_chromadb:
+  patchwise_sqlite:
+  patchwise_patches:
+  patchwise_logs:

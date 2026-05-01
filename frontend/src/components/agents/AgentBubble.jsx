@@ -4,6 +4,7 @@ import ThinkingCard from "./ThinkingCard";
 import JustificationCard from "./JustificationCard";
 import SimilarPatchCard from "../patch/SimilarPatchCard";
 import StatusBadge from "../layout/StatusBadge";
+import AryabhataMessage from "../AgentThread/AryabhataMessage";
 
 const badgeTone = {
   CRITICAL: "danger",
@@ -33,6 +34,10 @@ export default function AgentBubble({ message }) {
           {message.streaming ? <span className="streaming-cursor" /> : null}
         </p>
 
+        {message.type === "FIX_APPLIED" ? (
+          <AryabhataMessage message={message} />
+        ) : null}
+
         {message.type === "thinking" ? (
           <ThinkingCard
             title={isChanakya ? "🧠 Thinking..." : "⚙️ Computing fix..."}
@@ -46,6 +51,11 @@ export default function AgentBubble({ message }) {
           <div style={{ marginTop: 8, display: "flex", gap: 8 }}>
             <span className={`badge ${String(message.metadata.issue_type).toLowerCase()}`}>{message.metadata.issue_type}</span>
             <span className="small">line {message.metadata.line_number}</span>
+            {message.metadata?.recurring ? (
+              <span className="badge recurring">
+                ⚠️ Recurring — Round {message.metadata.first_seen}
+              </span>
+            ) : null}
           </div>
         ) : null}
 

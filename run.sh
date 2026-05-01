@@ -1,168 +1,200 @@
 #!/bin/bash
 
+# ============================================================
+#   PatchWise — run.sh
+#   CHANAKYA (Reviewer) ⟷ ARYABHATA (Developer)
+#   Autonomous A2A Patch Review System
+# ============================================================
+
 set -e
 
-# ─────────────────────────────────────────────
-#  PatchWise — Lifecycle Manager
-#  Usage:
-#    ./run.sh            → Start (default)
-#    ./run.sh start      → Start containers
-#    ./run.sh stop       → Stop containers
-#    ./run.sh restart    → Restart containers
-#    ./run.sh rebuild    → Force rebuild + restart
-#    ./run.sh logs       → Tail all logs
-#    ./run.sh status     → Show running containers
-#    ./run.sh seed       → Seed LKML ALSA/ASoC knowledge base
-#    ./run.sh test       → Run backend + frontend tests locally
-#    ./run.sh clean      → Remove containers + volumes
-# ─────────────────────────────────────────────
-
-BACKEND_DEFAULT_PORT=8000
-FRONTEND_DEFAULT_PORT=3000
-ENV_FILE=".env"
+IMAGE_NAME="patchwise"
 COMPOSE_FILE="docker-compose.yml"
-APP_NAME="PatchWise"
+ENV_FILE=".env"
+ENV_EXAMPLE=".env.example"
+DEFAULT_PORT=7000
 
-# Colors
-GREEN="\033[0;32m"
-YELLOW="\033[1;33m"
-RED="\033[0;31m"
-CYAN="\033[0;36m"
-BOLD="\033[1m"
-RESET="\033[0m"
-
+# ── ASCII Banner ─────────────────────────────────────────────
 print_banner() {
-  echo -e "${CYAN}"
-  echo "  ██████╗  █████╗ ████████╗ ██████╗██╗  ██╗██╗    ██╗██╗███████╗███████╗"
-  echo "  ██╔══██╗██╔══██╗╚══██╔══╝██╔════╝██║  ██║██║    ██║██║██╔════╝██╔════╝"
-  echo "  ██████╔╝███████║   ██║   ██║     ███████║██║ █╗ ██║██║███████╗█████╗  "
-  echo "  ██╔═══╝ ██╔══██║   ██║   ██║     ██╔══██║██║███╗██║██║╚════██║██╔══╝  "
-  echo "  ██║     ██║  ██║   ██║   ╚██████╗██║  ██║╚███╔███╔╝██║███████║███████╗"
-  echo "  ╚═╝     ╚═╝  ╚═╝   ╚═╝    ╚═════╝╚═╝  ╚═╝ ╚══╝╚══╝ ╚═╝╚══════╝╚══════╝"
-  echo -e "${RESET}"
-  echo -e "  ${BOLD}CHANAKYA (Reviewer) ⟷ ARYABHATA (Developer)${RESET}"
-  echo ""
+    echo ""
+    echo "  ██████╗  █████╗ ████████╗ ██████╗██╗  ██╗██╗    ██╗██╗███████╗███████╗"
+    echo "  ██╔══██╗██╔══██╗╚══██╔══╝██╔════╝██║  ██║██║    ██║██║██╔════╝██╔════╝"
+    echo "  ██████╔╝███████║   ██║   ██║     ███████║██║ █╗ ██║██║███████╗█████╗  "
+    echo "  ██╔═══╝ ██╔══██║   ██║   ██║     ██╔══██║██║███╗██║██║╚════██║██╔══╝  "
+    echo "  ██║     ██║  ██║   ██║   ╚██████╗██║  ██║╚███╔███╔╝██║███████║███████╗"
+    echo "  ╚═╝     ╚═╝  ╚═╝   ╚═╝    ╚═════╝╚═╝  ╚═╝ ╚══╝╚══╝ ╚═╝╚══════╝╚══════╝"
+    echo ""
+    echo "        🔍 CHANAKYA (Reviewer)  ⟷  🛠️  ARYABHATA (Developer)"
+    echo "             Autonomous A2A Kernel Patch Review System"
+    echo ""
 }
 
-# ─── Find free port ───────────────────────────────────────────────────────────
+# ── Dynamic Port Finder (AKDW pattern) ───────────────────────
 find_free_port() {
-  local port=$1
-  while lsof -i:"$port" &>/dev/null 2>&1; do
-    echo -e "  ${YELLOW}⚠  Port $port is in use — trying $((port + 1))...${RESET}"
-    port=$((port + 1))
-  done
-  echo "$port"
+    local port=$1
+    while lsof -iTCP:$port -sTCP:LISTEN &>/dev/null 2>&1; do
+        echo ">> Port $port is busy, trying $((port+1))..." >&2
+        port=$((port+1))
+    done
+    echo $port
 }
 
-# ─── Write .env file ──────────────────────────────────────────────────────────
+# ── Setup .env ───────────────────────────────────────────────
 setup_env() {
-  BACKEND_PORT=$(find_free_port $BACKEND_DEFAULT_PORT)
-  FRONTEND_PORT=$(find_free_port $FRONTEND_DEFAULT_PORT)
-
-  if [ ! -f "$ENV_FILE" ]; then
-    echo -e "  ${YELLOW}⚠  .env not found — creating from .env.example...${RESET}"
-    if [ -f ".env.example" ]; then
-      cp .env.example "$ENV_FILE"
-    else
-      touch "$ENV_FILE"
+    if [ ! -f "$ENV_FILE" ]; then
+        echo ">> .env not found. Creating from .env.example..."
+        cp "$ENV_EXAMPLE" "$ENV_FILE"
+        echo ">> Please review .env and update API keys if needed."
+        echo ">> Then run: ./run.sh start"
+        exit 0
     fi
-  fi
-
-  # Update ports in .env
-  if grep -q "BACKEND_PORT" "$ENV_FILE"; then
-    sed -i "s/BACKEND_PORT=.*/BACKEND_PORT=$BACKEND_PORT/" "$ENV_FILE"
-  else
-    echo "BACKEND_PORT=$BACKEND_PORT" >> "$ENV_FILE"
-  fi
-
-  if grep -q "FRONTEND_PORT" "$ENV_FILE"; then
-    sed -i "s/FRONTEND_PORT=.*/FRONTEND_PORT=$FRONTEND_PORT/" "$ENV_FILE"
-  else
-    echo "FRONTEND_PORT=$FRONTEND_PORT" >> "$ENV_FILE"
-  fi
-
-  echo -e "  ${GREEN}✔  Backend  → http://localhost:$BACKEND_PORT${RESET}"
-  echo -e "  ${GREEN}✔  Frontend → http://localhost:$FRONTEND_PORT${RESET}"
-  echo ""
+    source "$ENV_FILE"
 }
 
-# ─── Commands ─────────────────────────────────────────────────────────────────
+# ── Resolve port and update .env ─────────────────────────────
+resolve_port() {
+    local requested_port=${APP_PORT:-$DEFAULT_PORT}
+    local actual_port=$(find_free_port $requested_port)
+
+    if [ "$actual_port" != "$requested_port" ]; then
+        echo ">> Port $requested_port busy — using port $actual_port"
+        sed -i "s/^APP_PORT=.*/APP_PORT=$actual_port/" "$ENV_FILE"
+        export APP_PORT=$actual_port
+    else
+        export APP_PORT=$actual_port
+    fi
+    echo $actual_port
+}
+
+# ── Commands ─────────────────────────────────────────────────
+
 cmd_start() {
-  print_banner
-  echo -e "  ${BOLD}▶  Starting $APP_NAME...${RESET}"
-  echo ""
-  setup_env
-  docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" up -d
-  echo ""
-  echo -e "  ${GREEN}✅ $APP_NAME is running!${RESET}"
-  echo ""
+    print_banner
+    setup_env
+
+    echo ">> Checking Docker image..."
+    if [[ "$(docker images -q $IMAGE_NAME 2>/dev/null)" == "" ]]; then
+        echo ">> Image not found. Building now (this may take a few minutes)..."
+        docker compose build
+    fi
+
+    local port=$(resolve_port)
+    echo ">> Starting PatchWise on port $port..."
+    docker compose up -d
+
+    echo ""
+    echo "  ┌────────────────────────────────────────────────────┐"
+    echo "  │  ✅ PatchWise is starting up!                       │"
+    echo "  │                                                      │"
+    echo "  │  🌐 Open: http://localhost:$port                      │"
+    echo "  │                                                      │"
+    echo "  │  Note: First startup may take 30-40 seconds         │"
+    echo "  │  Run './run.sh logs' to watch startup progress       │"
+    echo "  └────────────────────────────────────────────────────┘"
+    echo ""
 }
 
 cmd_stop() {
-  echo -e "  ${RED}■  Stopping $APP_NAME...${RESET}"
-  docker compose -f "$COMPOSE_FILE" down
-  echo -e "  ${GREEN}✔  Stopped.${RESET}"
+    echo ">> Stopping PatchWise..."
+    docker compose down
+    echo ">> PatchWise stopped."
 }
 
 cmd_restart() {
-  echo -e "  ${YELLOW}↺  Restarting $APP_NAME...${RESET}"
-  docker compose -f "$COMPOSE_FILE" down
-  setup_env
-  docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" up -d
-  echo -e "  ${GREEN}✔  Restarted.${RESET}"
+    echo ">> Restarting PatchWise..."
+    docker compose restart
+    echo ">> PatchWise restarted."
 }
 
 cmd_rebuild() {
-  print_banner
-  echo -e "  ${YELLOW}🔨 Rebuilding $APP_NAME (force)...${RESET}"
-  setup_env
-  docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" up -d --build --force-recreate
-  echo -e "  ${GREEN}✅ Rebuild complete!${RESET}"
+    echo ">> Rebuilding PatchWise (applying .env changes)..."
+    docker compose down
+    docker compose build --no-cache
+    docker compose up -d --force-recreate
+    echo ">> PatchWise rebuilt and started."
 }
 
 cmd_logs() {
-  docker compose -f "$COMPOSE_FILE" logs -f --tail=100
+    echo ">> Streaming PatchWise logs (Ctrl+C to stop)..."
+    docker compose logs -f
 }
 
 cmd_status() {
-  docker compose -f "$COMPOSE_FILE" ps
+    echo ">> PatchWise container status:"
+    docker compose ps
+    echo ""
+    source "$ENV_FILE" 2>/dev/null || true
+    local port=${APP_PORT:-$DEFAULT_PORT}
+    echo ">> Health check: http://localhost:$port/api/health"
+    curl -s "http://localhost:$port/api/health" | python3 -m json.tool 2>/dev/null || echo "   (Container may still be starting up)"
 }
 
 cmd_clean() {
-  echo -e "  ${RED}🗑  Cleaning $APP_NAME containers and volumes...${RESET}"
-  docker compose -f "$COMPOSE_FILE" down -v --remove-orphans
-  echo -e "  ${GREEN}✔  Clean complete.${RESET}"
+    echo "⚠️  WARNING: This will remove all containers AND volumes (data will be lost)!"
+    read -p "   Are you sure? (yes/no): " confirm
+    if [ "$confirm" == "yes" ]; then
+        docker compose down -v --remove-orphans
+        docker rmi $IMAGE_NAME 2>/dev/null || true
+        echo ">> PatchWise fully cleaned."
+    else
+        echo ">> Cancelled."
+    fi
 }
 
 cmd_seed() {
-  echo -e "  ${CYAN}🌱 Seeding LKML ALSA/ASoC knowledge base...${RESET}"
-  python3 -m backend.app.knowledge.seed --subsystem alsa-asoc --months 24
-  echo -e "  ${GREEN}✔  Seed complete.${RESET}"
+    echo ">> Seeding LKML knowledge base (ALSA/ASoC audio subsystem)..."
+    echo ">> This may take 10-20 minutes depending on network speed."
+    docker compose exec patchwise python3 /app/backend/scripts/lkml_preseeder.py
+    echo ">> Seeding complete! Update .env: LKML_PRESEEDED=true"
 }
 
-cmd_test() {
-  echo -e "  ${CYAN}🧪 Running backend and frontend tests...${RESET}"
-  (cd backend && PYTHONPATH=. pytest tests -v --asyncio-mode=auto)
-  (cd frontend && npm run test -- --coverage --watchAll=false)
-  echo -e "  ${GREEN}✔  Test run complete.${RESET}"
+cmd_shell() {
+    echo ">> Opening shell inside PatchWise container..."
+    docker compose exec patchwise /bin/bash
 }
 
-# ─── Entry Point ──────────────────────────────────────────────────────────────
+# ── Help ─────────────────────────────────────────────────────
+cmd_help() {
+    print_banner
+    echo "  Usage: ./run.sh [command]"
+    echo ""
+    echo "  Commands:"
+    echo "    start     Start PatchWise (auto-finds free port)"
+    echo "    stop      Stop PatchWise"
+    echo "    restart   Restart containers"
+    echo "    rebuild   Full rebuild (use after code or .env changes)"
+    echo "    logs      Stream container logs"
+    echo "    status    Show container status + health check"
+    echo "    seed      Pre-seed LKML knowledge base (ALSA/ASoC)"
+    echo "    shell     Open shell inside container"
+    echo "    clean     Remove containers + volumes (⚠️ data loss!)"
+    echo "    help      Show this help"
+    echo ""
+    echo "  Examples:"
+    echo "    ./run.sh               # Start (default)"
+    echo "    ./run.sh rebuild       # After .env changes"
+    echo "    ./run.sh logs          # Debug startup issues"
+    echo "    ./run.sh seed          # Pre-seed KB before first use"
+    echo ""
+}
+
+# ── Main ─────────────────────────────────────────────────────
 COMMAND=${1:-start}
 
-case "$COMMAND" in
-  start)   cmd_start ;;
-  stop)    cmd_stop ;;
-  restart) cmd_restart ;;
-  rebuild) cmd_rebuild ;;
-  logs)    cmd_logs ;;
-  status)  cmd_status ;;
-  seed)    cmd_seed ;;
-  test)    cmd_test ;;
-  clean)   cmd_clean ;;
-  *)
-    echo -e "  ${RED}Unknown command: $COMMAND${RESET}"
-    echo "  Usage: ./run.sh [start|stop|restart|rebuild|logs|status|seed|test|clean]"
-    exit 1
-    ;;
+case $COMMAND in
+    start)   cmd_start ;;
+    stop)    cmd_stop ;;
+    restart) cmd_restart ;;
+    rebuild) cmd_rebuild ;;
+    logs)    cmd_logs ;;
+    status)  cmd_status ;;
+    seed)    cmd_seed ;;
+    shell)   cmd_shell ;;
+    clean)   cmd_clean ;;
+    help|--help|-h) cmd_help ;;
+    *)
+        echo "❌ Unknown command: $COMMAND"
+        cmd_help
+        exit 1
+        ;;
 esac

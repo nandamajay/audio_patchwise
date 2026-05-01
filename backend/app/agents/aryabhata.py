@@ -41,6 +41,15 @@ def _emit_tokens(
         )
 
 
+def _line_range_around(patch: str, line_number: int, radius: int = 1) -> tuple[int, int, str]:
+    lines = patch.splitlines()
+    line_number = max(1, min(line_number, len(lines) if lines else 1))
+    start = max(1, line_number - radius)
+    end = min(len(lines), line_number + radius)
+    snippet = "\n".join(lines[start - 1:end]) if lines else ""
+    return start, end, snippet
+
+
 def _apply_fix_once(patch: str, issue: dict[str, Any]) -> str:
     issue_type = issue.get("issue_type", "")
     if issue_type == "STYLE":
@@ -77,12 +86,16 @@ def aryabhata_fix_node(state: PatchWiseState) -> PatchWiseState:
     hint = state.get("interrupt_hint")
     thinking = "Computing one-pass comprehensive fix for all reported issues."
     if hint:
-        thinking += f" Interrupt hint received: {hint}."
+        thinking += f" IMPORTANT USER GUIDANCE: \"{hint}\"."
     _emit_tokens(state, "aryabhata", "thinking", round_id, thinking)
 
     justifications: list[dict[str, Any]] = []
-    for issue in findings:
-        patch = _apply_fix_once(patch, issue)
+    for index, issue in enumerate(findings, start=1):
+        line_number = int(issue.get("line_number", 1) or 1)
+        before_start, before_end, original_snippet = _line_range_around(patch, line_number)
+        updated_patch = _apply_fix_once(patch, issue)
+        _, _, fixed_snippet = _line_range_around(updated_patch, line_number)
+
         justification = {
             "issue": issue.get("description", "Issue"),
             "root_cause": f"Detected {issue.get('issue_type', 'UNKNOWN')} gap.",
@@ -90,26 +103,23 @@ def aryabhata_fix_node(state: PatchWiseState) -> PatchWiseState:
             "why_this_approach": "Preserves kernel semantics while satisfying review constraints.",
             "references": issue.get("similar_patch_refs", []),
         }
-        justifications.append(
-            {
-                "inline_summary": f"Fixed {issue.get('issue_type', 'issue')} at line {issue.get('line_number', '?')}",
-                "detailed_card": justification,
-            }
-        )
 
-        _emit(
-            state,
-            {
-                "agent": "aryabhata",
-                "type": "fix",
-                "round": round_id,
-                "content": justifications[-1]["inline_summary"],
-                "metadata": {
-                    "issue_type": issue.get("issue_type"),
-                    "line_number": issue.get("line_number"),
-                },
+        issue_id = issue.get("issue_id", f"issue-{index}")
+        fix_event = {
+            "agent": "aryabhata",
+            "type": "FIX_APPLIED",
+            "round": round_id,
+            "content": f"✅ Fix Applied for {issue.get('issue_type', 'ISSUE')} at line {line_number}",
+            "metadata": {
+                "issue_ref": issue_id,
+                "original_code": original_snippet,
+                "fixed_code": fixed_snippet,
+                "line_range": [before_start, before_end],
+                "justification": justification,
             },
-        )
+        }
+        _emit(state, fix_event)
+
         _emit_tokens(
             state,
             "aryabhata",
@@ -121,6 +131,19 @@ def aryabhata_fix_node(state: PatchWiseState) -> PatchWiseState:
             ),
             metadata=justification,
         )
+
+        justifications.append(
+            {
+                "inline_summary": fix_event["content"],
+                "detailed_card": justification,
+                "issue_ref": issue_id,
+                "original_code": original_snippet,
+                "fixed_code": fixed_snippet,
+                "line_range": [before_start, before_end],
+            }
+        )
+
+        patch = updated_patch
 
     state.setdefault("fix_attempts", []).append(
         {
