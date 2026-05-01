@@ -4,7 +4,6 @@ import { useNavigate } from "react-router-dom";
 import AryabhataAvatar from "../components/agents/AryabhataAvatar";
 import ChanakyaAvatar from "../components/agents/ChanakyaAvatar";
 import ContextBox from "../components/InputPanel/ContextBox";
-import PatchUpload from "../components/InputPanel/PatchUpload";
 import LLMDropdown from "../components/controls/LLMDropdown";
 import GlassCard from "../components/layout/GlassCard";
 import GradientHeader from "../components/layout/GradientHeader";
@@ -90,7 +89,6 @@ export default function InputConfig() {
         </GlassCard>
       </div>
 
-      <PatchUpload onPatchLoaded={(value) => setField("patchInput", value)} />
       <PatchInput value={patchInput} onChange={(value) => setField("patchInput", value)} />
 
       <div className="grid grid-2">

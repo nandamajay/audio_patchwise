@@ -4,6 +4,7 @@ const tabs = ["raw", "file", "gerrit", "lore"];
 
 export default function PatchInput({ value, onChange }) {
   const [activeTab, setActiveTab] = useState("raw");
+  const [selectedFileNames, setSelectedFileNames] = useState([]);
 
   const helperText = useMemo(() => {
     if (activeTab === "raw") return "Paste patch text directly.";
@@ -28,18 +29,39 @@ export default function PatchInput({ value, onChange }) {
       </div>
       <p className="small" style={{ marginBottom: 8 }}>{helperText}</p>
       {activeTab === "file" ? (
-        <input
-          className="input"
-          type="file"
-          accept=".patch,.txt"
-          onChange={(event) => {
-            const file = event.target.files?.[0];
-            if (!file) return;
-            const reader = new FileReader();
-            reader.onload = () => onChange(String(reader.result || ""));
-            reader.readAsText(file);
-          }}
-        />
+        <div style={{ display: "grid", gap: 8 }}>
+          <input
+            className="input"
+            type="file"
+            accept=".patch,.diff,.txt"
+            multiple
+            onChange={async (event) => {
+              const files = Array.from(event.target.files || []);
+              if (!files.length) return;
+
+              setSelectedFileNames(files.map((file) => file.name));
+
+              const contents = await Promise.all(
+                files.map(
+                  (file) =>
+                    new Promise((resolve) => {
+                      const reader = new FileReader();
+                      reader.onload = () =>
+                        resolve(`# FILE: ${file.name}\n${String(reader.result || "")}`);
+                      reader.readAsText(file);
+                    }),
+                ),
+              );
+
+              onChange(contents.join("\n\n").trim());
+            }}
+          />
+          {selectedFileNames.length ? (
+            <p className="small">
+              Selected {selectedFileNames.length} file(s): {selectedFileNames.join(", ")}
+            </p>
+          ) : null}
+        </div>
       ) : (
         <textarea
           className="textarea"
