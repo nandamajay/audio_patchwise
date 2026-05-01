@@ -5,7 +5,6 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: patchwise_app
     ports:
       - "${APP_PORT:-7000}:${APP_PORT:-7000}"
     environment:
