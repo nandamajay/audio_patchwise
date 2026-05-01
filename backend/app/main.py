@@ -107,6 +107,13 @@ except Exception:
     pass
 
 try:
+    from api.fetch_lore import router as lore_router
+
+    app.include_router(lore_router)
+except Exception:
+    pass
+
+try:
     from api.websocket import websocket_router
 
     app.include_router(websocket_router)

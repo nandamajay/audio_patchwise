@@ -1,67 +1,27 @@
 from __future__ import annotations
 
 import json
+import os
 from typing import Any, Optional
 
 from agents.chanakya_agent import CHANAKYA_ISSUE_FORMAT_PROMPT
-from agents.impact_analyzer import impact_analyzer
-from agents.shared.negotiation_bus import check_for_deadlock
 from app.agents.state import PatchWiseState
 from app.skills.patchwise_skill import full_patch_analysis
 from app.skills.search_skill import SearchSkill
-from agents.chanakya.version_intelligence import PatchVersionIntelligence
 from core.llm_factory import get_llm
 from core.patchwise_skill import PatchWiseResult, PatchWiseSkill
+from agents.version_intelligence import fetch_version_history
 from intelligence.cover_letter_reviewer import CoverLetterReviewer
+from intelligence.patch_version_intelligence import PatchVersionIntelligence
 
 
-CHANAKYA_SYSTEM_PROMPT = """
-You are CHANAKYA — the Reviewer Agent in the PatchWise A2A system.
-You review kernel patches for the audio subsystem (ALSA/ASoC).
+CHANAKYA_SYSTEM_PROMPT = (
+    "You are CHANAKYA, a sharp analytical kernel patch reviewer. "
+    "You must provide line-specific, structured, upstream-relevant issues.\n\n"
+    + CHANAKYA_ISSUE_FORMAT_PROMPT
+)
 
-ABSOLUTE OUTPUT RULES:
-
-RULE 1 — EVERY ISSUE MUST HAVE ALL FIELDS:
-Output issues as structured JSON array ONLY:
-
-{
-  "issues": [
-    {
-      "id": "issue_001",
-      "type": "STYLE|LOGIC|MEMORY|COMMIT|COMPLIANCE",
-      "severity": "CRITICAL|WARNING|INFO",
-      "line_number": 42,
-      "file_path": "sound/soc/qcom/audio-driver.c",
-      "problematic_code": "return -EINVAL;",
-      "suggested_fix": "return -ENOMEM;",
-      "explanation": "Wrong error code — ENOMEM for allocation failure per kernel convention",
-      "reference": "https://lore.kernel.org/...",
-      "confidence": 0.95,
-      "checkpatch_raw": "ERROR: return type mismatch"
-    }
-  ],
-  "round_summary": "Found 3 issues — 1 CRITICAL, 2 WARNING",
-  "lgtm": false,
-  "surgical_focus": [42, 43, 50]
-}
-
-RULE 2 — NEVER OUTPUT GENERIC TEXT.
-Always output specific findings per issue.
-
-RULE 3 — FOR SURGICAL RE-REVIEW:
-When reviewing touched lines only, explicitly state:
-"SURGICAL REVIEW — checking lines [n1, n2, n3] only based on ARYABHATA's changes"
-Only flag issues in the surgical scope lines.
-
-RULE 4 — SIMILAR PATCH SEARCH:
-Always search KB for similar patches and include reference URLs when found.
-
-RULE 5 — RECURRING ISSUE DETECTION:
-If an issue was flagged in a previous round and still exists, set:
-"recurring_from_round": <round_number>
-and explain that ARYABHATA's previous fix did not resolve it.
-""" + "\n\n" + CHANAKYA_ISSUE_FORMAT_PROMPT
-
+pvi = PatchVersionIntelligence()
 cover_reviewer = CoverLetterReviewer()
 _PATCHWISE_SKILL: PatchWiseSkill | None = None
 _PATCHWISE_INIT_ERROR: str | None = None
@@ -235,18 +195,10 @@ def _analyses_from_patchwise(pw_result: PatchWiseResult) -> dict[str, list[dict[
 
 
 def _build_review_prompt(patch_text: str, pw_result: PatchWiseResult, state: PatchWiseState) -> str:
-    review_type = state.get("review_type", "FULL")
-    scope_lines = state.get("review_scope_lines") or []
-    scope_text = (
-        f"SURGICAL REVIEW — checking lines {scope_lines} only based on ARYABHATA's changes."
-        if review_type == "SURGICAL" and scope_lines
-        else "FULL REVIEW over entire patch."
-    )
     return f"""You are CHANAKYA, a senior Linux kernel reviewer specializing
 in ALSA/ASoC audio subsystem patches for Qualcomm.
 
 You are reviewing Round {state.get('current_round', 1)} of this patch.
-{scope_text}
 
 PATCHWISE ANALYSIS (from official PatchWise tool via QGenie):
 {pw_result.raw_output[:3000]}
@@ -260,26 +212,12 @@ FULL PATCH CONTENT:
 PREVIOUS ROUNDS: {len(state.get('review_findings', []))}
 
 TASK:
-Return STRICT JSON OBJECT only:
-{{
-  "issues": [{{ ... }}],
-  "round_summary": "string",
-  "lgtm": false,
-  "surgical_focus": [{",".join(str(item) for item in scope_lines[:20]) if scope_lines else "1,2,3"}]
-}}
-
-Each issue must include:
-- id
-- type (STYLE|LOGIC|MEMORY|COMMIT|COMPLIANCE)
+Return JSON array where each item contains:
+- issue_id
 - severity (CRITICAL|WARNING|INFO)
-- line_number
-- file_path
-- problematic_code
+- error_message
 - suggested_fix
 - explanation
-- reference
-- confidence
-- checkpatch_raw
 
 Only refine existing issues and improve upstream relevance.
 Do not invent unrelated issues.
@@ -334,48 +272,28 @@ def _enrich_issues_with_remote_llm(
     except Exception:
         parsed = None
 
-    parsed_issues: list[dict[str, Any]] = []
-    if isinstance(parsed, dict):
-        maybe = parsed.get("issues")
-        if isinstance(maybe, list):
-            parsed_issues = [item for item in maybe if isinstance(item, dict)]
-    elif isinstance(parsed, list):
-        parsed_issues = [item for item in parsed if isinstance(item, dict)]
-    if not parsed_issues:
+    if not isinstance(parsed, list):
         return structured_issues, analysis_mode
 
-    by_id: dict[str, dict[str, Any]] = {}
-    for item in parsed_issues:
-        issue_id = item.get("issue_id") or item.get("id")
-        if isinstance(issue_id, str) and issue_id:
-            by_id[issue_id] = item
+    by_id = {
+        item.get("issue_id"): item
+        for item in parsed
+        if isinstance(item, dict) and isinstance(item.get("issue_id"), str)
+    }
 
     for issue in structured_issues:
-        update = by_id.get(issue["issue_id"]) or by_id.get(issue.get("id", ""))
+        update = by_id.get(issue["issue_id"])
         if not update:
             continue
         severity = update.get("severity")
         if severity in {"CRITICAL", "WARNING", "INFO"}:
             issue["severity"] = severity
-        issue_type = update.get("type") or update.get("category")
-        if issue_type in {"STYLE", "LOGIC", "MEMORY", "COMMIT", "COMPLIANCE"}:
-            issue["category"] = issue_type
-            issue["type"] = issue_type
         if isinstance(update.get("error_message"), str) and update["error_message"].strip():
             issue["error_message"] = update["error_message"].strip()
-        elif isinstance(update.get("problematic_code"), str) and update["problematic_code"].strip():
-            issue["problematic_code"] = update["problematic_code"].strip()
         if isinstance(update.get("suggested_fix"), str) and update["suggested_fix"].strip():
             issue["suggested_fix"] = update["suggested_fix"].strip()
         if isinstance(update.get("explanation"), str) and update["explanation"].strip():
             issue["explanation"] = update["explanation"].strip()
-        if isinstance(update.get("reference"), str):
-            issue["reference"] = update["reference"].strip() or issue.get("reference")
-        confidence = update.get("confidence")
-        if isinstance(confidence, (int, float)):
-            issue["confidence"] = max(0.0, min(1.0, float(confidence)))
-        if isinstance(update.get("checkpatch_raw"), str):
-            issue["checkpatch_raw"] = update["checkpatch_raw"]
 
     return structured_issues, analysis_mode
 
@@ -427,126 +345,140 @@ def _extract_cover_letter_and_series(patch_text: str) -> tuple[Optional[str], li
 
 
 async def _run_version_pre_review(state: PatchWiseState, round_id: int) -> list[dict[str, Any]]:
-    session_id = state["session_id"]
-    patch_content = state.get("current_patch") or state.get("patch_input", "")
-    user_link = state.get("lore_link") or state.get("gerrit_link") or ""
+    session_id = state.get("session_id", "")
+    patch_text = state.get("current_patch") or state.get("patch_input", "")
 
-    _emit(
-        state,
-        {
-            "agent": "chanakya",
-            "type": "thinking",
-            "round": round_id,
-            "content": (
-                "Analyzing with PatchWise (checkpatch + ai_code_review) and QGenie deep review. "
-                "Detecting patch version and prior review history..."
-            ),
-            "metadata": {},
-        },
+    _emit_tokens(state, "chanakya", "thinking", round_id, "Detecting patch version and prior review history.")
+
+    lore_list = "alsa-devel"
+    subsystem_text = str(state.get("subsystem", "")).lower()
+    if "asoc" in subsystem_text or "alsa" in subsystem_text:
+        lore_list = "alsa-devel"
+    input_url = state.get("input_url") or state.get("lore_url")
+    robust_history = await fetch_version_history(
+        patch_content=patch_text,
+        input_url=input_url,
+        subsystem=lore_list,
     )
 
-    vi = PatchVersionIntelligence()
-    chain = await vi.get_version_chain(
-        patch_content=patch_content,
-        user_provided_link=user_link,
-        session_id=session_id,
-    )
-
-    if chain.fetch_status == "NO_HISTORY":
-        _emit(
-            state,
-            {
-                "agent": "chanakya",
-                "type": "info",
-                "round": round_id,
-                "content": "v1 patch detected - no prior version history. Reviewing standalone.",
-                "metadata": {},
-            },
-        )
-    elif chain.fetch_status == "DEGRADED":
-        if chain.found_via == "not_found":
-            _emit(
-                state,
-                {
-                    "agent": "chanakya",
-                    "type": "needs_input",
-                    "round": round_id,
-                    "content": "",
-                    "metadata": {
-                        "message": (
-                            f"This appears to be v{chain.current_version} but no previous "
-                            f"version link was found. Searched by subject - not found. "
-                            f"Please provide the lore.kernel.org link to v{chain.current_version-1} "
-                            f"for complete context. Proceeding with standalone review."
-                        ),
-                        "type": "version_link_needed",
-                        "version": chain.current_version - 1,
-                    },
-                },
-            )
-        else:
-            _emit(
-                state,
-                {
-                    "agent": "chanakya",
-                    "type": "warning",
-                    "round": round_id,
-                    "content": (
-                        f"lore.kernel.org temporarily unreachable. "
-                        f"Reviewing v{chain.current_version} standalone (reduced context)."
-                    ),
-                    "metadata": {},
-                },
-            )
-    elif chain.fetch_status == "SUCCESS":
+    if robust_history.get("found"):
+        reviewer_comments = robust_history.get("reviewer_comments", [])
+        version_number = robust_history.get("version", 1)
         _emit(
             state,
             {
                 "agent": "chanakya",
                 "type": "version_history",
                 "round": round_id,
-                "content": "",
+                "content": (
+                    f"Version history loaded: {len(reviewer_comments)} reviewer comment(s) "
+                    f"for v{version_number} chain."
+                ),
                 "metadata": {
-                    "message": (
-                        f"Version history loaded: {len(chain.versions)} previous version(s)\n"
-                        f"{len(chain.reviewer_comments)} reviewer comments found\n"
-                        f"{len(chain.addressed_comments)} addressed in this version\n"
-                        f"{len(chain.unaddressed_comments)} unaddressed - require attention"
-                    ),
-                    "unaddressed": [
-                        {
-                            "author": c.author,
-                            "role": c.role,
-                            "preview": c.body[:100],
-                            "suggested_reply": c.suggested_reply,
-                            "reply_quality": c.reply_quality,
-                        }
-                        for c in chain.unaddressed_comments
+                    "latest_version": version_number,
+                    "unaddressed_count": len(reviewer_comments),
+                    "addressed_count": 0,
+                    "maintainers": [
+                        c.get("author", "")
+                        for c in reviewer_comments
+                        if c.get("is_maintainer")
                     ],
+                    "prev_version_url": robust_history.get("prev_version_url"),
                 },
             },
         )
+        state["version_chain"] = {
+            "latest_version": version_number,
+            "maintainers": [
+                c.get("author", "")
+                for c in reviewer_comments
+                if c.get("is_maintainer")
+            ],
+            "unaddressed_count": len(reviewer_comments),
+            "prev_version_url": robust_history.get("prev_version_url"),
+        }
+        return [
+            {
+                "issue_type": "COMPLIANCE",
+                "severity": "INFO",
+                "line_number": 1,
+                "description": f"Unaddressed review feedback from {comment.get('author', 'reviewer')}",
+                "suggestion": "Address reviewer feedback in this version or explain rationale in cover letter.",
+                "explanation": str(comment.get("body", ""))[:500],
+                "reviewer_name": comment.get("author", ""),
+                "reviewer_email": comment.get("author", ""),
+                "reviewer_type": "MAINTAINER" if comment.get("is_maintainer") else "COMMUNITY",
+                "message_id": "",
+            }
+            for comment in reviewer_comments
+        ]
 
-    state["version_chain"] = chain
-    state["version_intelligence_complete"] = True
+    if robust_history.get("degrade_message"):
+        _emit(
+            state,
+            {
+                "agent": "chanakya",
+                "type": "info",
+                "round": round_id,
+                "content": robust_history["degrade_message"],
+                "metadata": {"ask_user": bool(robust_history.get("ask_user"))},
+            },
+        )
+
+    chain = await pvi.analyze_patch_version(patch_text, session_id)
+    if not chain:
+        _emit(
+            state,
+            {
+                "agent": "chanakya",
+                "type": "info",
+                "round": round_id,
+                "content": "No previous version history found. Reviewing patch standalone.",
+            },
+        )
+        return []
+
+    _emit(
+        state,
+        {
+            "agent": "chanakya",
+            "type": "version_history",
+            "round": round_id,
+            "content": (
+                f"Detected v{chain.latest_version}; found {len(chain.unaddressed_comments)} "
+                "unaddressed prior comments"
+            ),
+            "metadata": {
+                "latest_version": chain.latest_version,
+                "unaddressed_count": len(chain.unaddressed_comments),
+                "addressed_count": len(chain.addressed_comments),
+                "maintainers": chain.maintainers,
+            },
+        },
+    )
 
     version_issues: list[dict[str, Any]] = []
     for comment in chain.unaddressed_comments:
         version_issues.append(
             {
                 "issue_type": "COMPLIANCE",
-                "severity": "CRITICAL" if comment.role == "MAINTAINER" else "INFO",
+                "severity": "CRITICAL" if comment.reviewer_type == "MAINTAINER" else "INFO",
                 "line_number": 1,
-                "description": f"Unaddressed review feedback from {comment.author}",
-                "suggestion": comment.suggested_reply,
-                "explanation": comment.body[:500],
-                "reviewer_name": comment.author,
-                "reviewer_email": comment.email,
-                "reviewer_type": comment.role,
+                "description": f"Unaddressed review feedback from {comment.reviewer_name}",
+                "suggestion": pvi.generate_suggested_reply(comment, fix_applied=False),
+                "explanation": comment.comment_text[:500],
+                "reviewer_name": comment.reviewer_name,
+                "reviewer_email": comment.reviewer_email,
+                "reviewer_type": comment.reviewer_type,
                 "message_id": comment.message_id,
             }
         )
 
+    state["version_chain"] = {
+        "latest_version": chain.latest_version,
+        "maintainers": chain.maintainers,
+        "unaddressed_count": len(chain.unaddressed_comments),
+    }
     return version_issues
 
 
@@ -555,63 +487,6 @@ async def chanakya_review_node(state: PatchWiseState) -> PatchWiseState:
     patch_text = state.get("current_patch") or state.get("patch_input", "")
     source_context = state.get("source_path", "")
     patch_lines = patch_text.splitlines()
-    touched_lines: list[int] = []
-    for value in state.get("touched_lines", []) or []:
-        try:
-            line = int(value)
-        except Exception:
-            continue
-        if line > 0:
-            touched_lines.append(line)
-    touched_lines = sorted(set(touched_lines))
-    review_type = "SURGICAL" if round_id > 1 and touched_lines else "FULL"
-    review_scope_lines: list[int] = []
-    if review_type == "SURGICAL":
-        impact = await impact_analyzer.get_impact_radius(
-            changed_lines=touched_lines,
-            patch_content=patch_text,
-        )
-        review_scope_lines = sorted(impact.full_scope)
-        _emit(
-            state,
-            {
-                "agent": "system",
-                "type": "impact_map_update",
-                "round": round_id,
-                "content": "Impact analysis updated for touched lines.",
-                "metadata": {
-                    "session_id": state.get("session_id", ""),
-                    "touched_lines": touched_lines,
-                    "impact_radius": {
-                        "direct": sorted(impact.direct_lines),
-                        "downstream": sorted(impact.downstream_lines),
-                        "upstream": sorted(impact.upstream_lines),
-                        "cross_file": [item.__dict__ for item in impact.cross_file_impacts],
-                        "impact_chain": list(impact.impact_chain),
-                    },
-                },
-            },
-        )
-        _emit(
-            state,
-            {
-                "agent": "chanakya",
-                "type": "surgical_review_start",
-                "round": round_id,
-                "content": (
-                    f"SURGICAL REVIEW — checking lines {review_scope_lines} only "
-                    "based on ARYABHATA's changes"
-                ),
-                "metadata": {
-                    "session_id": state.get("session_id", ""),
-                    "scope_lines": review_scope_lines,
-                    "scope_reason": "touched_lines_with_neighbor_radius",
-                    "review_type": review_type,
-                },
-            },
-        )
-    state["review_type"] = review_type
-    state["review_scope_lines"] = review_scope_lines
 
     hint = state.get("interrupt_hint")
     thinking = "Analyzing with PatchWise (checkpatch + ai_code_review) and QGenie deep review."
@@ -625,39 +500,30 @@ async def chanakya_review_node(state: PatchWiseState) -> PatchWiseState:
     skill, skill_error = _get_patchwise_skill()
     if skill:
         try:
-            fallback_result = await skill.run_with_fallback(
-                patch_content=patch_text,
-                kernel_version=str(state.get("kernel_version", "6.8")),
-            )
-            if isinstance(fallback_result, dict) and fallback_result.get("status") == "NEEDS_SOURCE":
-                patchwise_status = {
-                    "used": True,
-                    "success": False,
-                    "error": fallback_result.get("message"),
-                    "fallback": True,
-                    "missing_files": fallback_result.get("missing_files", []),
-                }
+            resolved_kernel_path = source_context if (source_context and os.path.isdir(source_context)) else None
+            if source_context and not resolved_kernel_path:
                 _emit(
                     state,
                     {
                         "agent": "chanakya",
-                        "type": "warning",
+                        "type": "info",
                         "round": round_id,
-                        "content": fallback_result.get("message", "PatchWise source files missing."),
-                        "metadata": {
-                            "missing_files": fallback_result.get("missing_files", []),
-                            "patchwise_fallback": True,
-                        },
+                        "content": (
+                            f"Kernel source path not found ({source_context}). "
+                            "Proceeding with PatchWise fallback context."
+                        ),
                     },
                 )
-                patchwise_result = None
-            else:
-                patchwise_result = fallback_result
-                patchwise_status = {
-                    "used": True,
-                    "success": bool(getattr(patchwise_result, "success", False)),
-                    "error": getattr(patchwise_result, "error", None),
-                }
+            patchwise_result = skill.review_patch_file(
+                patch_content=patch_text,
+                kernel_path=resolved_kernel_path,
+                subsystem=state.get("subsystem", "sound/soc"),
+            )
+            patchwise_status = {
+                "used": True,
+                "success": bool(patchwise_result.success),
+                "error": patchwise_result.error,
+            }
         except Exception as exc:
             patchwise_status = {"used": True, "success": False, "error": str(exc)}
     else:
@@ -705,9 +571,7 @@ async def chanakya_review_node(state: PatchWiseState) -> PatchWiseState:
 
         issue = {
             "issue_id": issue_id,
-            "id": issue_id,
             "category": category,
-            "type": category,
             "severity": raw_issue.get("severity", "WARNING"),
             "line_number": line_number,
             "file_path": file_path,
@@ -724,8 +588,6 @@ async def chanakya_review_node(state: PatchWiseState) -> PatchWiseState:
                 if category in {"COMMIT", "COMPLIANCE"}
                 else None
             ),
-            "confidence": 0.85,
-            "checkpatch_raw": raw_issue.get("description", ""),
             "is_recurring": False,
             "previous_round": None,
             "first_seen_round": round_id,
@@ -750,26 +612,7 @@ async def chanakya_review_node(state: PatchWiseState) -> PatchWiseState:
     for raw in version_issues:
         append_issue(raw, "COMPLIANCE")
 
-    structured_issues = [
-        issue
-        for issue in structured_issues
-        if not (
-            issue.get("type") in {"STYLE", "LOGIC", "MEMORY", "COMPLIANCE"}
-            and str(issue.get("problematic_code", "")).startswith("-")
-        )
-    ]
-
-    if review_type == "SURGICAL" and review_scope_lines:
-        scope_set = set(review_scope_lines)
-        structured_issues = [
-            item
-            for item in structured_issues
-            if int(item.get("line_number", 0) or 0) in scope_set
-        ]
-
-    prev_issues = state.get("previous_round_issues")
-    if not isinstance(prev_issues, list):
-        prev_issues = []
+    prev_issues = state.get("previous_round_issues", [])
     fix_history = state.get("fix_history", [])
     prev_fix = fix_history[-1] if fix_history else None
 
@@ -780,7 +623,6 @@ async def chanakya_review_node(state: PatchWiseState) -> PatchWiseState:
 
         issue["is_recurring"] = True
         issue["previous_round"] = matching_prev.get("first_seen_round", round_id - 1)
-        issue["recurring_from_round"] = issue["previous_round"]
         issue["first_seen_round"] = issue["previous_round"]
 
         attempted = check_fix_attempted(issue, prev_fix.get("changes_made", []) if isinstance(prev_fix, dict) else [])
@@ -792,41 +634,6 @@ async def chanakya_review_node(state: PatchWiseState) -> PatchWiseState:
 
         if issue["severity"] == "INFO":
             issue["severity"] = "WARNING"
-
-    negotiation_state = state.get("negotiation_state", {}) if isinstance(state.get("negotiation_state"), dict) else {}
-    for candidate in structured_issues:
-        issue_id = candidate.get("issue_id")
-        is_deadlock = await check_for_deadlock(
-            issue_id=issue_id,
-            session_id=state.get("session_id", ""),
-            negotiation_state=negotiation_state,
-        )
-        if not is_deadlock:
-            continue
-        _emit(
-            state,
-            {
-                "agent": "system",
-                "type": "arbitration_required",
-                "round": round_id,
-                "content": f"Deadlock on Issue #{issue_id}; user arbitration required.",
-                "metadata": {
-                    "session_id": state.get("session_id", ""),
-                    "issue_id": issue_id,
-                    "chanakya_position": candidate.get("error_message", ""),
-                    "aryabhata_position": candidate.get("suggested_fix", ""),
-                    "evidence_summary": {
-                        "recurring_from_round": candidate.get("recurring_from_round"),
-                        "fix_failed_reason": candidate.get("fix_failed_reason"),
-                        "reference": candidate.get("reference"),
-                    },
-                },
-            },
-        )
-        shared = state.get("shared_a2a_context")
-        if isinstance(shared, dict):
-            shared["user_arbitration_pending"] = True
-        break
 
     state["previous_round_issues"] = [dict(item) for item in structured_issues]
 
@@ -845,20 +652,17 @@ async def chanakya_review_node(state: PatchWiseState) -> PatchWiseState:
                 "round": round_id,
                 "content": issue["error_message"],
                 "metadata": {
-                    "issue_type": issue["type"],
+                    "issue_type": issue["category"],
                     "severity": issue["severity"],
                     "line_number": issue["line_number"],
                     "issue_id": issue["issue_id"],
                     "recurring": issue["is_recurring"],
-                    "recurring_from_round": issue.get("recurring_from_round"),
                     "first_seen": issue["first_seen_round"],
                     "missed_fix": issue.get("missed_fix", False),
                     "fix_attempted": issue.get("fix_attempted", False),
                     "fix_failed_reason": issue.get("fix_failed_reason"),
                     "analysis_mode": analysis_mode,
                     "patchwise": patchwise_status,
-                    "review_type": review_type,
-                    "scope_lines": review_scope_lines if review_type == "SURGICAL" else None,
                     "issue": issue,
                 },
             },
@@ -897,41 +701,11 @@ async def chanakya_review_node(state: PatchWiseState) -> PatchWiseState:
         "round": round_id,
         "issues": structured_issues,
         "findings": structured_issues,
-        "round_summary": f"Found {issue_count} issues — {len(critical_issues)} CRITICAL",
         "summary": f"Found {issue_count} issue(s).",
         "quality_score": quality_score,
         "analysis_mode": analysis_mode,
         "patchwise": patchwise_status,
-        "lgtm": verdict == "LGTM",
-        "surgical_focus": review_scope_lines if review_type == "SURGICAL" else [],
-        "review_type": review_type,
     }
-
-    _emit(
-        state,
-        {
-            "agent": "system",
-            "type": "a2a_message",
-            "round": round_id,
-            "content": f"CHANAKYA sent review report with {issue_count} issue(s).",
-            "metadata": {
-                "sender": "CHANAKYA",
-                "receiver": "ARYABHATA",
-                "type": "REVIEW_REPORT",
-                "content": f"Round {round_id} review report",
-                "issue_id": None,
-                "round": round_id,
-                "confidence": None,
-                "message_id": f"rvw-{round_id:03d}",
-                "timestamp": "",
-                "metadata": {
-                    "issue_count": issue_count,
-                    "review_type": review_type,
-                    "scope_lines": review_scope_lines if review_type == "SURGICAL" else [],
-                },
-            },
-        },
-    )
 
     state["latest_review"] = round_payload
     _ensure_list(state, "review_findings").append(round_payload)
@@ -947,17 +721,6 @@ async def chanakya_review_node(state: PatchWiseState) -> PatchWiseState:
 
     state["quality_score"] = quality_score
     state["verdict"] = verdict
-    shared = state.get("shared_a2a_context")
-    if isinstance(shared, dict):
-        shared.setdefault("chanakya_knowledge", {})
-        shared["lgtm"] = verdict == "LGTM"
-        shared["round_number"] = round_id
-        shared["current_patch"] = state.get("current_patch", patch_text)
-        shared["chanakya_knowledge"]["last_review_type"] = review_type
-        shared["chanakya_knowledge"]["last_scope"] = (
-            review_scope_lines if review_type == "SURGICAL" else "full"
-        )
-        state["shared_a2a_context"] = shared
 
     final_type = "lgtm" if verdict == "LGTM" else "verdict"
     _emit(
@@ -972,8 +735,6 @@ async def chanakya_review_node(state: PatchWiseState) -> PatchWiseState:
                 "issue_count": issue_count,
                 "analysis_mode": analysis_mode,
                 "patchwise": patchwise_status,
-                "review_type": review_type,
-                "scope_lines": review_scope_lines if review_type == "SURGICAL" else None,
             },
         },
     )

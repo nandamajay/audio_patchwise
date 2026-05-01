@@ -15,6 +15,9 @@ function buildPatchwiseNotice(patchwise) {
   if (rawError.includes("Could not infer commit hashes")) {
     return "PatchWise could not infer commit hashes from uploaded patch text. Using QGenie fallback review.";
   }
+  if (rawError.includes("No such file") || rawError.includes("Errno 2")) {
+    return "Kernel source files are missing for full PatchWise context. Continuing with QGenie fallback review.";
+  }
   return `PatchWise review unavailable for this input. Using QGenie fallback. Reason: ${rawError}`;
 }
 
@@ -23,11 +26,15 @@ function toSelection(config) {
   const provider = providerRaw === "qualcomm" ? "qgenie" : providerRaw;
   const modelRaw = String(config?.llm_model || "").trim();
 
-  if (provider.includes("/")) return provider;
-  if (provider.includes(":")) return provider.replace(":", "/");
-  if (PROVIDERS.has(provider)) return `${provider}/${modelRaw || "gpt-4o"}`;
-  if (provider) return `qgenie/${provider}`;
-  return "qgenie/gpt-4o";
+  if (provider.includes("/") || provider.includes(":")) {
+    const normalized = provider.replace(":", "/");
+    const [p, m] = normalized.split("/", 2);
+    if (p && m) return `${m}-${p}`;
+    return "gpt-4o-qgenie";
+  }
+  if (PROVIDERS.has(provider)) return `${modelRaw || "gpt-4o"}-${provider}`;
+  if (provider && !modelRaw) return `${provider}-qgenie`;
+  return "gpt-4o-qgenie";
 }
 
 const useSessionStore = create((set, get) => ({
@@ -40,9 +47,9 @@ const useSessionStore = create((set, get) => ({
   kernelVersion: "6.9",
   subsystem: "alsa-asoc",
   sourcePath: "sound/soc/",
-  llmModel: "qgenie/gpt-4o",
+  llmModel: "gpt-4o-qgenie",
   maxRounds: 5,
-  currentRound: 1,
+  currentRound: 0,
   qualityScore: 0,
   verdict: "PENDING",
   connected: false,
@@ -61,6 +68,29 @@ const useSessionStore = create((set, get) => ({
         return state;
       }
       return { [field]: value };
+    }),
+  setLlmModel: (model) => set(() => ({ llmModel: model })),
+  setMaxRounds: (n) =>
+    set(() => ({ maxRounds: Math.min(Math.max(Number(n) || 1, 1), 10) })),
+  incrementRound: () =>
+    set((state) => ({
+      currentRound: Math.min((state.currentRound || 0) + 1, state.maxRounds || 1),
+    })),
+  addRoundEntry: (entry) =>
+    set((state) => {
+      const nextEntry = {
+        ...entry,
+        id: Date.now(),
+      };
+      const lastEntry = state.roundHistory[state.roundHistory.length - 1];
+      if (
+        lastEntry &&
+        lastEntry.message === nextEntry.message &&
+        lastEntry.round === nextEntry.round
+      ) {
+        return state;
+      }
+      return { roundHistory: [...state.roundHistory, nextEntry] };
     }),
   setSession: (payload) => set(() => ({ ...payload })),
   setCurrentSession: (sessionId) => set(() => ({ currentSessionId: sessionId, sessionId })),
@@ -132,17 +162,26 @@ const useSessionStore = create((set, get) => ({
         ? buildPatchwiseNotice(normalized.metadata.patchwise)
         : state.patchwiseNotice;
 
+      const boundedRound = Math.min(
+        Number(normalized.round || state.currentRound || 0),
+        Number(state.maxRounds || 1),
+      );
       const roundHistory = [...state.roundHistory];
       if (["verdict", "lgtm"].includes(normalized.type)) {
-        const nextEntry = {
-          round: normalized.round,
-          summary: normalized.type === "lgtm" ? "LGTM" : normalized.content,
-        };
-        const alreadyExists = roundHistory.some(
-          (item) => item.round === nextEntry.round && item.summary === nextEntry.summary,
-        );
-        if (!alreadyExists) {
-          roundHistory.push(nextEntry);
+        const summary = normalized.type === "lgtm" ? "LGTM" : normalized.content;
+        const nextMessage = `Round ${boundedRound}: ${summary}`;
+        const lastEntry = roundHistory[roundHistory.length - 1];
+        const duplicate =
+          lastEntry &&
+          lastEntry.round === boundedRound &&
+          (lastEntry.summary === summary || lastEntry.message === nextMessage);
+        if (!duplicate) {
+          roundHistory.push({
+            round: boundedRound,
+            summary,
+            message: nextMessage,
+            id: Date.now(),
+          });
         }
       }
 
@@ -153,7 +192,7 @@ const useSessionStore = create((set, get) => ({
         verdict,
         patchwiseStatus,
         patchwiseNotice,
-        currentRound: normalized.round || state.currentRound,
+        currentRound: boundedRound || state.currentRound,
         roundHistory,
       };
     }),
@@ -221,7 +260,7 @@ const useSessionStore = create((set, get) => ({
       sessionId: "",
       originalPatch: "",
       currentPatch: "",
-      currentRound: 1,
+      currentRound: 0,
       qualityScore: 0,
       verdict: "PENDING",
       issueBreakdown: {},
@@ -232,5 +271,8 @@ const useSessionStore = create((set, get) => ({
       patchwiseNotice: "",
     })),
 }));
+
+export const displayRound = (state) =>
+  Math.min(Number(state.currentRound || 0), Number(state.maxRounds || 1));
 
 export default useSessionStore;

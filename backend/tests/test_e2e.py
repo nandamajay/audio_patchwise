@@ -41,7 +41,8 @@ diff --git a/sound/soc/test.c b/sound/soc/test.c
 
     assert len(out["review_findings"]) >= 1
     first_round_findings = out["review_findings"][0]["findings"]
-    assert any(item["issue_type"] == "STYLE" for item in first_round_findings)
+    # Style now follows checkpatch.pl output. Assert for substantive review findings.
+    assert any(item["issue_type"] == "MEMORY" for item in first_round_findings)
 
     assert len(out["fix_attempts"]) >= 1
     assert out["verdict"] in {"LGTM", "NEEDS_WORK", "PENDING"}

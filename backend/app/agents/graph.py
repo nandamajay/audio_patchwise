@@ -15,11 +15,36 @@ def _chanakya_review_sync(state: PatchWiseState) -> PatchWiseState:
     return asyncio.run(chanakya_review_node(state))
 
 def should_continue(state: PatchWiseState) -> str:
-    if state["verdict"] == "LGTM":
+    """
+    LangGraph conditional edge - decides next node.
+    HARD CAP: never exceed max_rounds.
+    """
+    current_round = state.get("current_round", 0)
+    max_rounds = state.get("max_rounds", 5)
+    last_review = state.get("latest_review", {})
+
+    if current_round >= max_rounds:
+        state["current_round"] = max_rounds
+        state["session_status"] = "MAX_ROUNDS_REACHED"
         return "end"
-    if state["current_round"] >= state["max_rounds"]:
+
+    if state.get("verdict") == "LGTM" or last_review.get("verdict") == "LGTM":
+        state["session_status"] = "LGTM"
         return "end"
+
+    if not last_review.get("issues") and not last_review.get("findings") and state.get("verdict") == "LGTM":
+        state["session_status"] = "LGTM"
+        return "end"
+
     return "aryabhata_fix"
+
+
+def increment_round_safely(state: PatchWiseState) -> PatchWiseState:
+    """Increment round with hard cap enforcement."""
+    max_rounds = state.get("max_rounds", 5)
+    current = state.get("current_round", 0)
+    state["current_round"] = min(current + 1, max_rounds)
+    return state
 
 def build_patchwise_graph():
     graph = StateGraph(PatchWiseState)

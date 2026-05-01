@@ -8,6 +8,7 @@ from api.dependencies import session_manager
 from api.ws_manager import websocket_manager
 from graph.interrupt_handler import interrupt_handler
 from graph.orchestrator import run_session_loop
+from services.history_manager import history_manager
 
 websocket_router = APIRouter(tags=["websocket"])
 _tasks: dict[str, asyncio.Task] = {}
@@ -32,6 +33,14 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
                 hint = (data.get("hint") or "").strip()
                 interrupt_handler.send_interrupt(session_id, hint or None)
                 session_manager.update_session(session_id, status="interrupted")
+                history_manager.increment_interrupt(session_id)
+                history_manager.save_message(
+                    session_id,
+                    "USER",
+                    "interrupt",
+                    hint or "Session pause requested",
+                    metadata={"hint": hint or None},
+                )
                 await websocket_manager.broadcast(
                     session_id,
                     {
@@ -45,6 +54,12 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
             elif event_type == "resume":
                 interrupt_handler.send_resume(session_id)
                 session_manager.update_session(session_id, status="running")
+                history_manager.save_message(
+                    session_id,
+                    "SYSTEM",
+                    "resume",
+                    "Session resumed by user.",
+                )
                 await websocket_manager.broadcast(
                     session_id,
                     {
@@ -60,6 +75,12 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
                     session_id,
                     status="interrupted",
                     verdict="USER_ABORTED",
+                )
+                history_manager.save_message(
+                    session_id,
+                    "USER",
+                    "abort",
+                    "Session aborted by user.",
                 )
                 await websocket_manager.broadcast(
                     session_id,

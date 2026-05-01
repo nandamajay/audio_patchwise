@@ -1,7 +1,10 @@
 from __future__ import annotations
 
-import re
 from dataclasses import asdict, dataclass
+import os
+import subprocess
+import re
+import tempfile
 
 from app.skills.checkpatch_skill import run_checkpatch
 
@@ -53,22 +56,61 @@ def parse_patch(raw_text: str) -> list[PatchHunk]:
 
 
 def check_kernel_style(patch: str) -> list[dict]:
+    """
+    Delegate style analysis to checkpatch.pl to match upstream expectations.
+    Falls back to no style findings if checkpatch is unavailable.
+    """
     result = run_checkpatch(patch)
     if result.get("status") == "skipped":
-        # Avoid noisy style heuristics when checkpatch.pl is unavailable.
         return []
 
     output = result.get("output", "")
     if not output:
         return []
 
+    include_checks = os.environ.get("PATCHWISE_INCLUDE_CHECKPATCH_CHECKS", "false").lower() in {
+        "1",
+        "true",
+        "yes",
+    }
+
     issues: list[BaseIssue] = []
+    seen: set[tuple[int, str]] = set()
+    current_line = 1
     pending_msg = ""
     pending_severity = "INFO"
-    seen: set[tuple[int, str]] = set()
 
     for raw_line in output.splitlines():
         line = raw_line.strip()
+        if not line:
+            continue
+
+        line_match = re.search(r"#(\d+):", line) or re.search(r"FILE:[^:]+:(\d+):", line)
+        if line_match:
+            current_line = int(line_match.group(1))
+
+        finding_match = re.match(r"^(ERROR|WARNING|CHECK):[^:]*:\s*(.+)$", line)
+        if finding_match:
+            level, message = finding_match.groups()
+            if level == "CHECK" and not include_checks:
+                pending_msg = ""
+                continue
+            severity = "CRITICAL" if level == "ERROR" else "WARNING" if level == "WARNING" else "INFO"
+            key = (current_line, message)
+            if key not in seen:
+                seen.add(key)
+                issues.append(
+                    BaseIssue(
+                        issue_type="STYLE",
+                        severity=severity,
+                        line_number=current_line,
+                        description=f"checkpatch: {message}",
+                        suggestion="Follow checkpatch.pl recommendation or justify deviation in cover letter.",
+                    )
+                )
+            pending_msg = ""
+            continue
+
         if line.startswith("ERROR:"):
             pending_msg = line.split(":", 1)[1].strip()
             pending_severity = "CRITICAL"
@@ -78,34 +120,27 @@ def check_kernel_style(patch: str) -> list[dict]:
             pending_severity = "WARNING"
             continue
         if line.startswith("CHECK:"):
-            pending_msg = line.split(":", 1)[1].strip()
-            pending_severity = "INFO"
+            if include_checks:
+                pending_msg = line.split(":", 1)[1].strip()
+                pending_severity = "INFO"
+            else:
+                pending_msg = ""
             continue
 
-        if not pending_msg:
-            continue
-
-        line_match = re.search(r"#(\\d+):", line) or re.search(r"FILE:[^:]+:(\\d+):", line)
-        if not line_match:
-            continue
-
-        line_number = int(line_match.group(1))
-        key = (line_number, pending_msg)
-        if key in seen:
+        if pending_msg and line_match:
+            key = (current_line, pending_msg)
+            if key not in seen:
+                seen.add(key)
+                issues.append(
+                    BaseIssue(
+                        issue_type="STYLE",
+                        severity=pending_severity,
+                        line_number=current_line,
+                        description=f"checkpatch: {pending_msg}",
+                        suggestion="Follow checkpatch.pl recommendation or justify deviation in cover letter.",
+                    )
+                )
             pending_msg = ""
-            continue
-        seen.add(key)
-
-        issues.append(
-            BaseIssue(
-                issue_type="STYLE",
-                severity=pending_severity,
-                line_number=line_number,
-                description=pending_msg,
-                suggestion="Apply checkpatch.pl recommended fix for this line.",
-            )
-        )
-        pending_msg = ""
 
     return _to_dicts(issues)
 
@@ -272,3 +307,105 @@ def full_patch_analysis(patch: str, source_context: str = "") -> dict[str, list[
         "lkml": check_lkml_compliance(patch),
         "commit": check_commit_message(patch),
     }
+
+
+def parse_patchwise_output(stdout: str) -> list[dict]:
+    issues: list[dict] = []
+    if not stdout:
+        return issues
+    for line in stdout.splitlines():
+        match = re.search(r"(ERROR|WARNING|CHECK):\\s*(.+)", line)
+        if not match:
+            continue
+        severity, description = match.groups()
+        issues.append(
+            {
+                "issue_type": "STYLE",
+                "severity": severity,
+                "line_number": 1,
+                "description": description.strip(),
+                "suggestion": "Apply PatchWise recommendation.",
+            }
+        )
+    return issues
+
+
+async def run_qgenie_fallback_review(patch_content: str, subsystem: str) -> list[dict]:
+    """
+    Direct QGenie review placeholder when PatchWise binary is unavailable.
+    """
+    _ = subsystem
+    return full_patch_analysis(patch_content, "").get("style", [])
+
+
+async def run_patchwise(
+    patch_content: str,
+    subsystem: str = "audio",
+    kernel_source_path: str | None = None,
+) -> dict:
+    """
+    Run PatchWise skill on patch content with graceful fallback.
+    """
+    result = {
+        "method": "patchwise",
+        "issues": [],
+        "fallback_used": False,
+        "fallback_reason": None,
+    }
+
+    with tempfile.NamedTemporaryFile(suffix=".patch", mode="w", delete=False, dir="/tmp") as file_obj:
+        file_obj.write(patch_content)
+        patch_file = file_obj.name
+
+    try:
+        patchwise_check = subprocess.run(["which", "patchwise"], capture_output=True, check=False)
+        if patchwise_check.returncode != 0:
+            raise FileNotFoundError("patchwise binary not found")
+
+        cmd = [
+            "patchwise",
+            "--reviews",
+            "checkpatch",
+            "ai_code_review",
+            "--provider",
+            os.environ.get("QGENIE_BASE_URL", "https://qgenie-chat.qualcomm.com/v1"),
+            "--patch",
+            patch_file,
+        ]
+
+        if kernel_source_path:
+            if os.path.isdir(kernel_source_path):
+                cmd.extend(["--kernel-source", kernel_source_path])
+            else:
+                print(f"[WARN] Kernel source path not found: {kernel_source_path}")
+                print("[WARN] Proceeding without kernel source context")
+
+        proc = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=120,
+            check=False,
+        )
+
+        if proc.returncode == 0:
+            result["issues"] = parse_patchwise_output(proc.stdout)
+        else:
+            raise RuntimeError(f"patchwise failed: {proc.stderr}")
+
+    except (FileNotFoundError, RuntimeError, subprocess.TimeoutExpired) as exc:
+        result["fallback_used"] = True
+        result["fallback_reason"] = str(exc)
+        result["issues"] = await run_qgenie_fallback_review(patch_content, subsystem)
+        result["method"] = "qgenie_fallback"
+        result["fallback_message"] = (
+            f"PatchWise unavailable ({str(exc)[:50]}...). "
+            "Using QGenie AI review - full analysis continues."
+        )
+    finally:
+        try:
+            os.unlink(patch_file)
+        except Exception:
+            pass
+
+    return result

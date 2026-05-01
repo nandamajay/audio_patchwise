@@ -26,3 +26,16 @@ data/
 .DS_Store
 .vscode/
 .idea/
+
+# Secrets - NEVER COMMIT
+secrets/gerrit_id_rsa
+secrets/gerrit_id_rsa.pub
+secrets/github_token.txt
+secrets/*.pem
+secrets/*.key
+secrets/*.p12
+*.pem
+*_rsa
+*_ed25519
+.env
+!.env.example

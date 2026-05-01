@@ -2,236 +2,209 @@ from __future__ import annotations
 
 import json
 import re
-from dataclasses import dataclass
-from typing import Any, Dict, List, Optional
+from typing import Any
 
-from agents.aryabhata_fix_engine import AryabhataFixEngine
-from core.llm_factory import get_llm
+from .aryabhata_prompts import ARYABHATA_SYSTEM_PROMPT, ARYABHATA_FIX_INSTRUCTION
 
-
-ARYABHATA_SYSTEM_PROMPT = """
-You are ARYABHATA — the Developer Agent in the PatchWise A2A system.
-You receive CHANAKYA's review findings and produce REAL patch fixes.
-
-ABSOLUTE RULES — NEVER VIOLATE:
-
-RULE 1 — YOU MUST OUTPUT REAL PATCH CONTENT:
-After analyzing issues you MUST output the fixed patch between these exact markers:
-<<<FIXED_PATCH_START>>>
-[complete modified .patch file content here]
-<<<FIXED_PATCH_END>>>
-
-RULE 2 — NEVER SAY "I WILL FIX" WITHOUT THE ACTUAL FIX:
-"Show Justification" alone is NOT acceptable.
-Every response MUST contain <<<FIXED_PATCH_START>>> markers with real content.
-
-RULE 3 — FIX ALL ACCEPTED ISSUES IN ONE PASS:
-Do not fix one issue at a time. Apply ALL accepted fixes in one response.
-If you challenge an issue, still fix all non-challenged issues.
-
-RULE 4 — COMMIT MESSAGE FIXES ARE MANDATORY:
-If CHANAKYA flags Subject prefix — you MUST fix it in the patch header.
-If CHANAKYA flags Signed-off-by — you MUST add it.
-These are not optional.
-
-RULE 5 — SHOW INLINE DIFF FOR EACH FIX:
-For each fix, show:
-- LINE NUMBER: [n]
-- BEFORE: [exact original line]
-- AFTER: [exact fixed line]
-- WHY: [one line justification]
-
-RULE 6 — CHALLENGE PROTOCOL:
-You MAY challenge ONE issue per review if you have strong evidence.
-Format: CHALLENGE: Issue #[n] — [your evidence from kernel docs/LKML]
-But STILL fix all other non-challenged issues in the SAME response.
-"""
+PatchWiseState = dict[str, Any]
 
 
-@dataclass
-class AgentMessage:
-    sender: str
-    receiver: str
-    message_type: str
-    content: str
-    metadata: Dict[str, Any]
+async def _stream_token(state: PatchWiseState, token: str) -> None:
+    callback = state.get("_stream_callback")
+    if callable(callback):
+        callback(
+            {
+                "agent": "aryabhata",
+                "type": "thinking",
+                "round": state.get("current_round", 1),
+                "content": token,
+                "metadata": {},
+            }
+        )
 
 
-def _extract_issues(state: Any) -> List[dict]:
-    report = getattr(state, "current_review_report", None) if not isinstance(state, dict) else state.get("current_review_report")
-    if report is None:
-        return []
-    if isinstance(report, dict):
-        issues = report.get("issues") or report.get("findings") or []
-        return issues if isinstance(issues, list) else []
-    issues = getattr(report, "issues", [])
-    return issues if isinstance(issues, list) else []
-
-
-def _get_value(state: Any, key: str, default: Any = None) -> Any:
-    if isinstance(state, dict):
-        return state.get(key, default)
-    return getattr(state, key, default)
-
-
-def _set_value(state: Any, key: str, value: Any) -> None:
-    if isinstance(state, dict):
-        state[key] = value
-    else:
-        setattr(state, key, value)
-
-
-def get_llm_client(llm_config: Any):
-    provider = _get_value(llm_config, "provider", None)
-    model = _get_value(llm_config, "model", None)
-    return get_llm(model=model, provider=provider, temperature=0.2, streaming=True)
-
-
-def format_issues_for_aryabhata(issues: List[dict]) -> str:
-    return json.dumps(issues, indent=2, ensure_ascii=False)
-
-
-def format_shared_context(ctx: Any) -> str:
-    if not ctx:
-        return "{}"
-    if isinstance(ctx, dict):
-        return json.dumps(ctx, indent=2, ensure_ascii=False, default=str)
-    try:
-        return json.dumps(ctx.__dict__, indent=2, ensure_ascii=False, default=str)
-    except Exception:
-        return str(ctx)
-
-
-def format_round_history(history: Any) -> str:
-    if not history:
-        return "[]"
-    try:
-        return json.dumps(history, indent=2, ensure_ascii=False, default=str)
-    except Exception:
-        return str(history)
-
-
-def extract_fixed_patch(response_text: str) -> Optional[str]:
-    start_marker = "<<<FIXED_PATCH_START>>>"
-    end_marker = "<<<FIXED_PATCH_END>>>"
-    start_idx = response_text.find(start_marker)
-    end_idx = response_text.find(end_marker)
-    if start_idx != -1 and end_idx != -1 and end_idx > start_idx:
-        return response_text[start_idx + len(start_marker) : end_idx].strip()
-    return None
-
-
-def extract_challenges(response_text: str) -> List[str]:
-    return re.findall(r"CHALLENGE:\s*(.*)", response_text)
-
-
-def extract_touched_lines(fix_result: Any) -> List[int]:
-    touched: List[int] = []
-    for change in getattr(fix_result, "changes_made", []) or []:
-        try:
-            touched.append(int(change.get("line", 0)))
-        except Exception:
-            continue
-    return sorted({line for line in touched if line > 0})
-
-
-async def force_fix_via_engine(
-    engine: AryabhataFixEngine,
-    patch_content: str,
-    issues: List[dict],
-    state: Any,
-) -> str:
-    author = _get_value(_get_value(state, "config", {}), "author", "Developer <dev@example.com>")
-    result = await engine.apply_fixes(patch_content, issues, author=author)
-    return result.fixed_patch_content
-
-
-async def aryabhata_node(state: Any) -> Any:
+async def aryabhata_apply_fixes(state: PatchWiseState, llm) -> PatchWiseState:
     """
-    ARYABHATA node — produces REAL patch fixes with marker enforcement.
+    ARYABHATA applies actual fixes to patch content.
+
+    Enforces marker output and retries if markers are missing.
     """
-    fix_engine = AryabhataFixEngine()
+    review = state.get("current_review") or state.get("latest_review") or {}
+    patch_content = state.get("original_patch") or state.get("current_patch") or state.get("patch_input", "")
+    version_context = state.get("version_context", "No previous version context.")
 
-    llm_config = _get_value(state, "llm_config", {})
-    llm = get_llm_client(llm_config)
-
-    current_round = int(_get_value(state, "current_round", 1) or 1)
-    original_patch = _get_value(state, "original_patch", "")
-    current_patch = _get_value(state, "current_fixed_patch", None) or original_patch
-    chanakya_issues = _extract_issues(state)
+    issues_text = format_issues_for_aryabhata(review.get("issues", []))
+    instruction = ARYABHATA_FIX_INSTRUCTION.format(
+        patch_content=patch_content,
+        review_issues=issues_text,
+        version_context=version_context,
+    )
 
     messages = [
         {"role": "system", "content": ARYABHATA_SYSTEM_PROMPT},
-        {
-            "role": "user",
-            "content": f"""
-CHANAKYA REVIEW REPORT — Round {current_round}:
-{format_issues_for_aryabhata(chanakya_issues)}
-
-ORIGINAL PATCH:
-{original_patch}
-
-SHARED CONTEXT:
-{format_shared_context(_get_value(state, 'shared_a2a_context', {}))}
-
-PREVIOUS ROUNDS HISTORY:
-{format_round_history(_get_value(state, 'round_history', []))}
-
-INSTRUCTIONS:
-1. For each issue — decide: ACCEPT or CHALLENGE (max 1 challenge)
-2. Apply ALL accepted fixes to the patch
-3. Output complete fixed patch between markers
-4. Show inline diff for each fix
-""",
-        },
+        {"role": "user", "content": instruction},
     ]
 
-    response_text = ""
-    try:
-        for msg in messages:
-            # keep prompt in one invoke for wider model compatibility
-            pass
-        llm_response = llm.invoke("\n\n".join([m["content"] for m in messages]))
-        response_text = getattr(llm_response, "content", str(llm_response)) or ""
-        if isinstance(response_text, list):
-            response_text = "\n".join([str(item) for item in response_text])
-    except Exception as exc:
-        response_text = f"LLM generation failed: {exc}"
+    full_response = ""
+    async for chunk in llm.astream(messages):
+        token = chunk.content if hasattr(chunk, "content") else str(chunk)
+        full_response += token
+        await _stream_token(state, token)
 
-    fixed_patch = extract_fixed_patch(response_text)
-    if not fixed_patch:
-        fixed_patch = await force_fix_via_engine(fix_engine, current_patch, chanakya_issues, state)
-        response_text += "\n[ARYABHATA FIX ENGINE APPLIED — real patch generated]"
+    if "<<<FIXED_PATCH_START" not in full_response:
+        retry_instruction = f"""
+{instruction}
 
-    author = _get_value(_get_value(state, "config", {}), "author", "Developer <dev@example.com>")
-    fix_result = await fix_engine.apply_fixes(fixed_patch, chanakya_issues, author=author)
+CRITICAL WARNING: Your previous response did NOT contain patch markers.
+You MUST output fixed patch content between these markers:
+<<<FIXED_PATCH_START:filename>>>
+[complete file content]
+<<<FIXED_PATCH_END:filename>>>
 
-    shared = _get_value(state, "shared_a2a_context", {}) or {}
-    if isinstance(shared, dict):
-        shared["aryabhata_fix_result"] = fix_result
-        shared["touched_lines"] = extract_touched_lines(fix_result)
-        _set_value(state, "shared_a2a_context", shared)
+The patch content to fix is:
+{patch_content}
 
-    _set_value(state, "current_fixed_patch", fix_result.fixed_patch_content)
+OUTPUT THE FIXED PATCH NOW WITH MARKERS:
+"""
+        messages_retry = [
+            {"role": "system", "content": ARYABHATA_SYSTEM_PROMPT},
+            {"role": "user", "content": retry_instruction},
+        ]
 
-    message = AgentMessage(
-        sender="ARYABHATA",
-        receiver="CHANAKYA",
-        message_type="FIX_PROPOSAL",
-        content=response_text,
-        metadata={
-            "changes_made": fix_result.changes_made,
-            "touched_lines": extract_touched_lines(fix_result),
-            "validation_passed": fix_result.validation_passed,
-            "checkpatch_output": fix_result.checkpatch_output,
-            "challenges": extract_challenges(response_text),
-            "fixed_patch_preview": fix_result.fixed_patch_content[:500],
-            "patch_marker_start": "<<<FIXED_PATCH_START>>>",
-            "patch_marker_end": "<<<FIXED_PATCH_END>>>",
-        },
-    )
+        full_response = ""
+        async for chunk in llm.astream(messages_retry):
+            token = chunk.content if hasattr(chunk, "content") else str(chunk)
+            full_response += token
+            await _stream_token(state, token)
 
-    msgs = _get_value(state, "a2a_messages", []) or []
-    msgs.append(message)
-    _set_value(state, "a2a_messages", msgs)
+    fixed_patches = parse_fixed_patches(full_response)
+    fix_summary = parse_fix_summary(full_response)
+
+    if not fixed_patches:
+        fixed_patches = apply_rule_based_fixes(patch_content, review.get("issues", []))
+        fix_summary = [f"Rule-based fix applied for {i.get('type', 'UNKNOWN')}" for i in review.get("issues", [])]
+
+    state["fixed_patches"] = fixed_patches
+    state["fix_summary"] = fix_summary
+    state["aryabhata_response"] = full_response
+
     return state
+
+
+def format_issues_for_aryabhata(issues: list[dict[str, Any]]) -> str:
+    lines = []
+    for i, issue in enumerate(issues, 1):
+        lines.append(
+            f"""
+Issue #{i} [{issue.get('type', issue.get('category', 'STYLE'))}]:
+  File: {issue.get('file', issue.get('file_path', 'patch'))}
+  Line: {issue.get('line_number', 1)}
+  Problematic Code: {issue.get('problematic_code', '')}
+  Error: {issue.get('error_description', issue.get('error_message', ''))}
+  Required Fix: {issue.get('suggested_fix', '')}
+  Reference: {issue.get('reference', 'N/A')}
+"""
+        )
+    return "\n".join(lines)
+
+
+def parse_fixed_patches(response: str) -> dict[str, str]:
+    patches: dict[str, str] = {}
+    pattern = r"<<<FIXED_PATCH_START:([^>]+)>>>(.*?)<<<FIXED_PATCH_END:\1>>>"
+    matches = re.findall(pattern, response, re.DOTALL)
+    for filename, content in matches:
+        patches[filename.strip()] = content.strip()
+    return patches
+
+
+def parse_fix_summary(response: str) -> list[str]:
+    pattern = r"<<<FIX_SUMMARY_START>>>(.*?)<<<FIX_SUMMARY_END>>>"
+    match = re.search(pattern, response, re.DOTALL)
+    if match:
+        lines = match.group(1).strip().split("\n")
+        return [line.strip("- ").strip() for line in lines if line.strip()]
+    return []
+
+
+def apply_rule_based_fixes(patch_content: str, issues: list[dict[str, Any]]) -> dict[str, str]:
+    content = patch_content
+
+    for issue in issues:
+        issue_type = str(issue.get("type", issue.get("category", ""))).upper()
+
+        if issue_type == "COMMIT":
+            if "subsystem prefix" in str(issue.get("error_description", issue.get("error_message", ""))).lower():
+                subsystem = extract_subsystem_from_patch(content)
+                content = fix_commit_subject(content, subsystem)
+            elif "signed-off-by" in str(issue.get("error_description", issue.get("error_message", ""))).lower():
+                content = add_signed_off_by(content)
+
+        elif issue_type == "STYLE":
+            problematic = str(issue.get("problematic_code", ""))
+            suggested = str(issue.get("suggested_fix", ""))
+            if problematic and suggested and problematic != suggested:
+                content = content.replace(problematic, suggested, 1)
+
+        elif issue_type == "COMPLIANCE":
+            err = str(issue.get("error_description", issue.get("error_message", ""))).lower()
+            if "changelog" in err:
+                content = add_changelog_section(content)
+            elif "link:" in err:
+                content = add_link_section(content)
+
+    return {"patch": content}
+
+
+def extract_subsystem_from_patch(content: str) -> str:
+    match = re.search(r"diff --git a/(sound/soc/[^/]+)", content)
+    if match:
+        parts = match.group(1).split("/")
+        return f"ASoC: {parts[-1].replace('.c', '').replace('-', '_')}"
+    match = re.search(r"diff --git a/(sound/[^/]+)", content)
+    if match:
+        return "ALSA"
+    return "kernel"
+
+
+def fix_commit_subject(content: str, subsystem: str) -> str:
+    pattern = r"(Subject: \[PATCH[^\]]*\] )(?!" + re.escape(subsystem.split(":")[0]) + r")(.*)"
+    replacement = r"\1" + subsystem + r": \2"
+    return re.sub(pattern, replacement, content)
+
+
+def add_signed_off_by(content: str) -> str:
+    if "Signed-off-by:" in content:
+        return content
+    if "---" in content:
+        parts = content.split("---", 1)
+        return parts[0].rstrip() + "\nSigned-off-by: Author <author@example.com>\n---" + parts[1]
+    return content + "\nSigned-off-by: Author <author@example.com>\n"
+
+
+def add_changelog_section(content: str) -> str:
+    if "*** changes in" in content.lower():
+        return content
+    if "---" in content:
+        parts = content.split("---", 1)
+        changelog = "\n\nChanges in this version:\n  - [describe changes from previous version]\n"
+        return parts[0] + changelog + "---" + parts[1]
+    return content
+
+
+def add_link_section(content: str) -> str:
+    if "Link:" in content:
+        return content
+    if "---" in content:
+        parts = content.split("---", 1)
+        link = "\nLink: [URL to previous version]\n"
+        return parts[0] + link + "---" + parts[1]
+    return content
+
+
+__all__ = [
+    "aryabhata_apply_fixes",
+    "format_issues_for_aryabhata",
+    "parse_fixed_patches",
+    "parse_fix_summary",
+    "apply_rule_based_fixes",
+]

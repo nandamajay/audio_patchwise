@@ -7,7 +7,7 @@ class SessionStartRequest(BaseModel):
     source_path: str = Field(default="")
     llm_provider: str = Field(default="qgenie")
     llm_model: str = Field(default="gpt-4o")
-    max_rounds: int = Field(default=5, ge=1, le=5)
+    max_rounds: int = Field(default=5, ge=1, le=10)
 
 
 class SessionResponse(BaseModel):

@@ -19,7 +19,7 @@ export default function RoundTracker({ current = 1, max = 5, history = [] }) {
       </div>
       <div style={{ display: "grid", gap: 4 }}>
         {history.length ? history.map((item) => (
-          <div key={`round-${item.round}`} className="small">
+          <div key={item.id || `round-${item.round}-${item.summary || ""}`} className="small">
             Round {item.round}: {item.summary}
           </div>
         )) : <span className="small">Waiting for first review round.</span>}

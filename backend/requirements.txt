@@ -9,7 +9,7 @@ langchain-community==0.2.5
 patchwise>=0.1.0
 chromadb==0.5.0
 sentence-transformers==3.0.1
-sqlalchemy==2.0.30
+sqlalchemy==2.0.29
 alembic==1.13.1
 pydantic==2.7.1
 pydantic-settings==2.2.1
@@ -20,3 +20,6 @@ requests==2.32.2
 beautifulsoup4==4.12.3
 lxml==5.2.2
 PyGithub==2.3.0
+reportlab>=4.1.0
+markdown>=3.5.0
+apscheduler==3.10.4

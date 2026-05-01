@@ -1,34 +1,12 @@
-"""
-WebSocket event helper for True A2A UI events.
-"""
-
 from __future__ import annotations
 
-from typing import Any
-
-from app.runtime import connection_manager
+from api.ws_manager import websocket_manager
 
 
-class WebSocketEventManager:
-    async def emit_to_session(
-        self,
-        session_id: str,
-        event_type: str,
-        payload: dict[str, Any],
-    ) -> None:
-        """
-        Emit typed event envelopes for frontend consumers.
-        """
-        await connection_manager.broadcast(
-            session_id,
-            {
-                "agent": "system",
-                "type": event_type,
-                "round": payload.get("round", 0),
-                "content": payload.get("content", ""),
-                "metadata": payload,
-            },
-        )
+class WebSocketManagerAdapter:
+    async def emit_to_session(self, session_id: str, event: str, data: dict):
+        payload = {"event": event, **(data or {})}
+        await websocket_manager.broadcast(session_id, payload)
 
 
-websocket_manager = WebSocketEventManager()
+ws_manager = WebSocketManagerAdapter()

@@ -2,43 +2,31 @@ import { useEffect } from "react";
 import { Link } from "react-router-dom";
 
 import InterruptPanel from "../components/ChatThread/InterruptPanel";
+import HistorySidebar from "../components/HistorySidebar";
 import ThreadView from "../components/AgentThread/ConversationThread";
 import IssueTracker from "../components/controls/IssueTracker";
 import RoundTracker from "../components/controls/RoundTracker";
 import SessionHistory from "../components/SessionHistory/SessionHistory";
 import GlassCard from "../components/layout/GlassCard";
 import useAgentStream from "../hooks/useAgentStream";
-import { useA2A } from "../hooks/useA2A";
 import useInterrupt from "../hooks/useInterrupt";
 import useSessionStore from "../store/sessionStore";
-import ArbitrationModal from "../components/ArbitrationModal";
+import { displayRound } from "../store/sessionStore";
 
 export default function ConversationThread() {
-  const {
-    sessionId,
-    currentRound,
-    maxRounds,
-    messages,
-    qualityScore,
-    verdict,
-    patchwiseNotice,
-    issueBreakdown,
-    roundHistory,
-    fetchSessions,
-  } = useSessionStore();
+  const sessionId = useSessionStore((state) => state.sessionId);
+  const currentRound = useSessionStore(displayRound);
+  const maxRounds = useSessionStore((state) => state.maxRounds);
+  const messages = useSessionStore((state) => state.messages);
+  const qualityScore = useSessionStore((state) => state.qualityScore);
+  const verdict = useSessionStore((state) => state.verdict);
+  const patchwiseNotice = useSessionStore((state) => state.patchwiseNotice);
+  const issueBreakdown = useSessionStore((state) => state.issueBreakdown);
+  const roundHistory = useSessionStore((state) => state.roundHistory);
+  const fetchSessions = useSessionStore((state) => state.fetchSessions);
 
   const { sendEvent } = useAgentStream(sessionId);
   const { isPaused, isAborted, hint, setHint, sendInterrupt, sendResume, sendAbort } = useInterrupt(sessionId, sendEvent);
-  const {
-    impactRadius,
-    arbitrationPending,
-    arbitrationData,
-    challengeTimeout,
-    surgicalScope,
-    resolveArbitration,
-    updateChallengeTimeout,
-    getNegotiationThread,
-  } = useA2A(sessionId);
 
   useEffect(() => {
     fetchSessions();
@@ -47,6 +35,7 @@ export default function ConversationThread() {
   return (
     <div className="grid grid-3">
       <div className="grid">
+        <HistorySidebar />
         <SessionHistory />
         <RoundTracker current={currentRound} max={maxRounds} history={roundHistory} />
         <IssueTracker breakdown={issueBreakdown} />
@@ -65,14 +54,7 @@ export default function ConversationThread() {
           </div>
         ) : null}
 
-        <ThreadView
-          messages={messages}
-          impactRadius={impactRadius}
-          touchedLines={surgicalScope || []}
-          challengeTimeout={challengeTimeout}
-          onTimeoutChange={updateChallengeTimeout}
-          getNegotiationThread={getNegotiationThread}
-        />
+        <ThreadView messages={messages} sessionId={sessionId} />
 
         {verdict === "LGTM" ? (
           <div className="lgtm-banner">✅ LGTM — CHANAKYA approves the patch!</div>
@@ -118,10 +100,6 @@ export default function ConversationThread() {
           <p style={{ marginTop: 8 }}>{qualityScore.toFixed(0)} / 100</p>
         </GlassCard>
       </div>
-
-      {arbitrationPending && arbitrationData ? (
-        <ArbitrationModal data={arbitrationData} onDecide={resolveArbitration} />
-      ) : null}
     </div>
   );
 }

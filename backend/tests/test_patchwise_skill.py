@@ -1,3 +1,4 @@
+import app.skills.patchwise_skill as patchwise_skill
 from app.skills.patchwise_skill import (
     check_lkml_compliance,
     check_memory_safety,
@@ -7,10 +8,43 @@ from app.skills.patchwise_skill import (
 )
 
 
-def test_checkpatch_analyzer_with_sample_patch() -> None:
+def test_checkpatch_analyzer_with_sample_patch(monkeypatch) -> None:
     sample = "Subject: fix\n+\tint x = 0;\n"
+
+    monkeypatch.setattr(
+        patchwise_skill,
+        "run_checkpatch",
+        lambda _patch: {
+            "status": "issues",
+            "output": "WARNING:LINE_SPACING: please, no spaces at the start of a line\n#2: FILE: foo.c:2:",
+        },
+    )
     issues = check_kernel_style(sample)
     assert any(item["issue_type"] == "STYLE" for item in issues)
+    assert any("checkpatch:" in item["description"] for item in issues)
+
+
+def test_checkpatch_missing_does_not_flood_style_issues(monkeypatch) -> None:
+    monkeypatch.setattr(
+        patchwise_skill,
+        "run_checkpatch",
+        lambda _patch: {"status": "skipped", "reason": "missing", "output": ""},
+    )
+    issues = check_kernel_style("Subject: fix\n+\tint x = 0;\n")
+    assert issues == []
+
+
+def test_checkpatch_check_findings_are_filtered_by_default(monkeypatch) -> None:
+    monkeypatch.setattr(
+        patchwise_skill,
+        "run_checkpatch",
+        lambda _patch: {
+            "status": "issues",
+            "output": "CHECK:LONG_LINE: line length of 90 exceeds 80 columns\n#3: FILE: foo.c:3:",
+        },
+    )
+    issues = check_kernel_style("Subject: fix\n+int x = 0;\n")
+    assert issues == []
 
 
 def test_lsp_context_extractor_finds_symbols() -> None:

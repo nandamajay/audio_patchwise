@@ -15,11 +15,24 @@ export default function useSession() {
 
   const startSession = useCallback(async () => {
     const llmSelection = String(llmModel || "");
-    const [llmProviderRaw, llmModelRaw] = llmSelection.includes("/")
-      ? llmSelection.split("/", 2)
-      : llmSelection.includes(":")
-        ? llmSelection.split(":", 2)
-        : ["qgenie", llmSelection || "gpt-4o"];
+    let llmProviderRaw = "qgenie";
+    let llmModelRaw = "gpt-4o";
+    if (llmSelection.includes("/")) {
+      [llmProviderRaw, llmModelRaw] = llmSelection.split("/", 2);
+    } else if (llmSelection.includes(":")) {
+      [llmProviderRaw, llmModelRaw] = llmSelection.split(":", 2);
+    } else if (llmSelection.endsWith("-qgenie")) {
+      llmProviderRaw = "qgenie";
+      llmModelRaw = llmSelection.replace(/-qgenie$/, "");
+    } else if (llmSelection.endsWith("-openai")) {
+      llmProviderRaw = "openai";
+      llmModelRaw = llmSelection.replace(/-openai$/, "");
+    } else if (llmSelection.endsWith("-anthropic")) {
+      llmProviderRaw = "anthropic";
+      llmModelRaw = llmSelection.replace(/-anthropic$/, "");
+    } else if (llmSelection) {
+      llmModelRaw = llmSelection;
+    }
     const llmProvider = llmProviderRaw || "qgenie";
     const resolvedModel = llmModelRaw || "gpt-4o";
 
