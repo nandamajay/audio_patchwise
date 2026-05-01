@@ -185,11 +185,18 @@ check_qgenie_and_patchwise() {
 
     echo "🔧 Checking PatchWise installation..."
     local check_image="$IMAGE_NAME"
-    if docker image inspect patchwise-backend >/dev/null 2>&1; then
+    local compose_image
+    compose_image="$(basename "$PWD" | tr '[:upper:]' '[:lower:]' | tr -cs 'a-z0-9' '_' | sed 's/_$//')-patchwise"
+    local has_compose_image=0
+    if docker image inspect "$compose_image" >/dev/null 2>&1; then
+        check_image="$compose_image"
+        has_compose_image=1
+    fi
+    if [ "$has_compose_image" -eq 0 ] && docker image inspect patchwise-backend >/dev/null 2>&1; then
         check_image="patchwise-backend"
     fi
     if docker image inspect "$check_image" >/dev/null 2>&1; then
-        if docker run --rm "$check_image" patchwise --version > /dev/null 2>&1; then
+        if docker run --rm --entrypoint patchwise "$check_image" --help > /dev/null 2>&1; then
             echo "  ✅ PatchWise installed and ready"
         else
             echo "  ⚠️  PatchWise not found in image yet — it will be available after build/install"

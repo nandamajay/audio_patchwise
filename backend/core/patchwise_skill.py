@@ -74,7 +74,7 @@ class PatchWiseSkill:
         """Verify patchwise is installed and callable."""
         try:
             result = subprocess.run(
-                ["patchwise", "--version"],
+                ["patchwise", "--help"],
                 capture_output=True,
                 text=True,
                 check=False,
@@ -242,7 +242,7 @@ class PatchWiseSkill:
         """Health check payload for System Health dashboard."""
         try:
             result = subprocess.run(
-                ["patchwise", "--version"],
+                ["patchwise", "--help"],
                 capture_output=True,
                 text=True,
                 timeout=5,
@@ -250,7 +250,7 @@ class PatchWiseSkill:
             )
             return {
                 "installed": result.returncode == 0,
-                "version": (result.stdout or result.stderr).strip(),
+                "version": "patchwise-cli",
                 "provider": self.provider,
                 "reviews": self.reviews,
                 "api_key_set": bool(self.api_key),

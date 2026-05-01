@@ -1,8 +1,7 @@
-from agents.aryabhata_agent import ARYABHATA_SYSTEM_PROMPT
-from agents.aryabhata import AryabhataAgent
-from agents.chanakya import ChanakyaAgent
-from agents.chanakya_agent import CHANAKYA_ISSUE_FORMAT_PROMPT, CHANAKYA_SYSTEM_PROMPT
-from agents.chanakya_parser import ChanakyaIssueParser
+from __future__ import annotations
+
+import importlib
+from typing import Any
 
 __all__ = [
     "ARYABHATA_SYSTEM_PROMPT",
@@ -12,3 +11,19 @@ __all__ = [
     "CHANAKYA_ISSUE_FORMAT_PROMPT",
     "ChanakyaIssueParser",
 ]
+
+
+def __getattr__(name: str) -> Any:
+    # Lazy imports prevent circular import during app startup.
+    if name == "ARYABHATA_SYSTEM_PROMPT":
+        return importlib.import_module("agents.aryabhata_agent").ARYABHATA_SYSTEM_PROMPT
+    if name == "AryabhataAgent":
+        return importlib.import_module("agents.aryabhata").AryabhataAgent
+    if name == "ChanakyaAgent":
+        return importlib.import_module("agents.chanakya").ChanakyaAgent
+    if name in {"CHANAKYA_SYSTEM_PROMPT", "CHANAKYA_ISSUE_FORMAT_PROMPT"}:
+        module = importlib.import_module("agents.chanakya_agent")
+        return getattr(module, name)
+    if name == "ChanakyaIssueParser":
+        return importlib.import_module("agents.chanakya_parser").ChanakyaIssueParser
+    raise AttributeError(f"module 'agents' has no attribute '{name}'")
