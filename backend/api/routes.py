@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import os
 
-from fastapi import APIRouter
+from fastapi import APIRouter, BackgroundTasks
 
 from app.config import settings
 from feedback.feedback_manager import FeedbackManager
 from knowledge_base.lkml_targeter import LKMLTargeter
+from monitoring.health_monitor import HealthMonitor
 from submission.dry_run import CheckStatus, DryRunManager
 
 router = APIRouter(prefix="/api", tags=["advanced"])
@@ -116,3 +117,25 @@ async def record_vote(payload: dict):
 async def feedback_leaderboard():
     feedback_manager = FeedbackManager()
     return {"leaderboard": feedback_manager.get_leaderboard()}
+
+
+@router.get("/health/full")
+async def full_health():
+    monitor = HealthMonitor()
+    return monitor.get_full_health()
+
+
+@router.post("/health/reseed")
+async def trigger_reseed(background_tasks: BackgroundTasks):
+    from knowledge_base.lkml_seeder import LKMLSeeder
+
+    background_tasks.add_task(LKMLSeeder().seed_all)
+    return {"message": "Re-seeding started in background"}
+
+
+@router.post("/health/rebuild-embeddings")
+async def rebuild_embeddings(background_tasks: BackgroundTasks):
+    from knowledge_base.embedding_builder import rebuild_all
+
+    background_tasks.add_task(rebuild_all)
+    return {"message": "Embedding rebuild started in background"}
