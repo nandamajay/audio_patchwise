@@ -42,7 +42,12 @@ echo "  ✅ nginx configured on port ${APP_PORT}"
 
 echo "  🚀 Starting ARYABHATA + CHANAKYA backend..."
 cd /app/backend
-uvicorn main:app --host 127.0.0.1 --port 8000 --workers 2 &
+BACKEND_WORKERS=${BACKEND_WORKERS:-1}
+if [ "${BACKEND_WORKERS}" != "1" ]; then
+    echo "  ⚠️  In-memory session mode requires a single worker. Forcing BACKEND_WORKERS=1."
+    BACKEND_WORKERS=1
+fi
+uvicorn main:app --host 127.0.0.1 --port 8000 --workers "${BACKEND_WORKERS}" &
 BACKEND_PID=$!
 echo "  ✅ Backend started (PID: ${BACKEND_PID})"
 

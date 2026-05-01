@@ -14,6 +14,10 @@ except Exception:  # pragma: no cover
 router = APIRouter(prefix="/session", tags=["session"])
 
 
+def _sanitize_state(payload: dict) -> dict:
+    return {key: value for key, value in payload.items() if not callable(value)}
+
+
 @router.post("/start", response_model=SessionResponse)
 def start_session(payload: SessionStartRequest) -> SessionResponse:
     llm_provider, llm_model = parse_provider_model(payload.llm_provider, payload.llm_model)
@@ -75,7 +79,7 @@ def start_session(payload: SessionStartRequest) -> SessionResponse:
 def get_session(session_id: str) -> dict:
     state = SESSION_STORE.get(session_id)
     if state:
-        return state
+        return _sanitize_state(state)
 
     if session_manager:
         snapshot = session_manager.get_session(session_id)

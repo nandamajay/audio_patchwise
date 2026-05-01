@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from typing import Any
 
 
@@ -15,6 +16,11 @@ class PatchVectorStore:
         self.embedding_model = embedding_model
         self._fallback_docs: list[dict[str, Any]] = []
         self._collection = None
+        chroma_enabled = os.getenv("PATCHWISE_ENABLE_CHROMA", "0").strip().lower()
+        self._enable_chroma = chroma_enabled in {"1", "true", "yes", "on"}
+
+        if not self._enable_chroma:
+            return
 
         try:
             import chromadb

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import traceback
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
@@ -8,9 +9,113 @@ from app.agents.graph import patchwise_graph
 from app.knowledge.sql_store import PatchSQLStore
 from app.knowledge.vector_store import PatchVectorStore
 from app.runtime import REPORT_STORE, SESSION_STORE, connection_manager
+try:
+    from api.dependencies import session_manager
+except Exception:  # pragma: no cover
+    session_manager = None
 
 router = APIRouter(tags=["agents"])
 RUN_TASKS: dict[str, asyncio.Task] = {}
+
+
+def _list_or_empty(value):
+    return value if isinstance(value, list) else []
+
+
+def _normalize_state(state: dict) -> dict:
+    if not isinstance(state, dict):
+        return {}
+
+    for key in (
+        "review_findings",
+        "fix_attempts",
+        "similar_patches",
+        "conversation_log",
+        "messages",
+        "fix_history",
+        "current_issues",
+    ):
+        if not isinstance(state.get(key), list):
+            state[key] = []
+
+    if not isinstance(state.get("latest_review"), dict):
+        state["latest_review"] = {}
+
+    patch_input = state.get("patch_input")
+    if isinstance(patch_input, dict):
+        patch_input = patch_input.get("raw_text", "")
+    if patch_input is None:
+        patch_input = ""
+    if not isinstance(patch_input, str):
+        patch_input = str(patch_input)
+    state["patch_input"] = patch_input
+
+    current_patch = state.get("current_patch")
+    if current_patch is None:
+        current_patch = ""
+    if not isinstance(current_patch, str):
+        current_patch = str(current_patch)
+    if not current_patch:
+        current_patch = patch_input
+    state["current_patch"] = current_patch
+
+    max_rounds = state.get("max_rounds", 5)
+    if not isinstance(max_rounds, int) or max_rounds <= 0:
+        max_rounds = 5
+    state["max_rounds"] = max_rounds
+
+    current_round = state.get("current_round", 1)
+    if not isinstance(current_round, int) or current_round <= 0:
+        current_round = 1
+    state["current_round"] = current_round
+
+    if not state.get("llm_provider"):
+        state["llm_provider"] = "qgenie"
+    if not state.get("llm_model"):
+        state["llm_model"] = "gpt-4o"
+    return state
+
+
+def _hydrate_session_from_persistent_store(session_id: str) -> None:
+    if session_id in SESSION_STORE or session_manager is None:
+        return
+
+    snapshot = session_manager.get_session(session_id)
+    if not snapshot:
+        return
+
+    patch_input = snapshot.patch_input or {}
+    patch_text = (
+        patch_input.get("raw_text")
+        or patch_input.get("file_path", "")
+        or patch_input.get("gerrit_url", "")
+        or patch_input.get("lkml_url", "")
+    )
+
+    review_report = snapshot.review_report or {}
+
+    SESSION_STORE[session_id] = _normalize_state(
+        {
+            "session_id": session_id,
+            "patch_input": patch_text,
+            "kernel_version": snapshot.context.get("kernel_version", "unknown"),
+            "subsystem": snapshot.context.get("subsystem", "alsa-asoc"),
+            "source_path": snapshot.context.get("source_path", ""),
+            "llm_provider": snapshot.config.get("llm_provider", "qgenie"),
+            "llm_model": snapshot.config.get("llm_model", "gpt-4o"),
+            "max_rounds": snapshot.max_rounds or snapshot.config.get("max_rounds", 5),
+            "current_round": max(1, snapshot.current_round or 1),
+            "review_findings": _list_or_empty(review_report.get("review_findings")),
+            "fix_attempts": _list_or_empty(review_report.get("fix_attempts")),
+            "similar_patches": _list_or_empty(review_report.get("similar_patches")),
+            "current_patch": snapshot.final_patch or patch_text,
+            "verdict": snapshot.verdict or "PENDING",
+            "interrupt_hint": None,
+            "conversation_log": _list_or_empty(snapshot.conversation),
+            "quality_score": review_report.get("quality_score", 0.0),
+            "messages": [],
+        }
+    )
 
 
 def _stream_callback_for(loop: asyncio.AbstractEventLoop, session_id: str):
@@ -28,10 +133,67 @@ async def run_agent_loop(session_id: str) -> None:
     if not state:
         return
 
+    state = _normalize_state(state)
+
     loop = asyncio.get_running_loop()
     state["_stream_callback"] = _stream_callback_for(loop, session_id)
+    SESSION_STORE[session_id] = state
 
-    final_state = await asyncio.to_thread(patchwise_graph.invoke, state)
+    if session_manager:
+        try:
+            session_manager.update_session(
+                session_id,
+                status="running",
+                current_round=state.get("current_round", 1),
+            )
+        except Exception:
+            pass
+
+    try:
+        final_state = await asyncio.to_thread(patchwise_graph.invoke, state)
+    except Exception as exc:
+        error_text = traceback.format_exc(limit=6)
+        await connection_manager.broadcast(
+            session_id,
+            {
+                "agent": "system",
+                "type": "error",
+                "round": state.get("current_round", 1),
+                "content": f"Agent loop failed: {exc}",
+                "metadata": {"traceback": error_text},
+            },
+        )
+        state["verdict"] = "NEEDS_WORK"
+        state.setdefault("conversation_log", []).append(
+            {
+                "agent": "system",
+                "message": f"Agent loop failed: {exc}",
+                "traceback": error_text,
+            }
+        )
+        state.pop("_stream_callback", None)
+        SESSION_STORE[session_id] = state
+        if session_manager:
+            try:
+                session_manager.update_session(
+                    session_id,
+                    status="failed",
+                    current_round=state.get("current_round", 1),
+                    verdict=state.get("verdict", "NEEDS_WORK"),
+                    final_patch=state.get("current_patch", ""),
+                    conversation=state.get("conversation_log", []),
+                    review_report={
+                        "review_findings": state.get("review_findings", []),
+                        "fix_attempts": state.get("fix_attempts", []),
+                        "similar_patches": state.get("similar_patches", []),
+                        "quality_score": state.get("quality_score", 0.0),
+                    },
+                )
+            except Exception:
+                pass
+        return
+    final_state = _normalize_state(final_state)
+    final_state.pop("_stream_callback", None)
     SESSION_STORE[session_id] = final_state
 
     try:
@@ -53,6 +215,25 @@ async def run_agent_loop(session_id: str) -> None:
         "similar_patches": final_state.get("similar_patches", []),
     }
 
+    if session_manager:
+        try:
+            session_manager.update_session(
+                session_id,
+                status="completed",
+                current_round=final_state.get("current_round", 1),
+                verdict=final_state.get("verdict", "PENDING"),
+                final_patch=final_state.get("current_patch", ""),
+                conversation=final_state.get("conversation_log", []),
+                review_report={
+                    "review_findings": final_state.get("review_findings", []),
+                    "fix_attempts": final_state.get("fix_attempts", []),
+                    "similar_patches": final_state.get("similar_patches", []),
+                    "quality_score": final_state.get("quality_score", 0.0),
+                },
+            )
+        except Exception:
+            pass
+
     await connection_manager.broadcast(
         session_id,
         {
@@ -73,6 +254,9 @@ async def run_agent_loop(session_id: str) -> None:
 @router.websocket("/ws/agent-stream/{session_id}")
 @router.websocket("/ws/{session_id}")
 async def agent_stream(websocket: WebSocket, session_id: str) -> None:
+    _hydrate_session_from_persistent_store(session_id)
+    if session_id in SESSION_STORE:
+        SESSION_STORE[session_id] = _normalize_state(SESSION_STORE[session_id])
     await connection_manager.connect(session_id, websocket)
     try:
         await connection_manager.broadcast(
@@ -109,7 +293,9 @@ async def agent_stream(websocket: WebSocket, session_id: str) -> None:
                     },
                 )
             elif msg_type == "start":
+                _hydrate_session_from_persistent_store(session_id)
                 if session_id in SESSION_STORE:
+                    SESSION_STORE[session_id] = _normalize_state(SESSION_STORE[session_id])
                     running = RUN_TASKS.get(session_id)
                     if running is None or running.done():
                         RUN_TASKS[session_id] = asyncio.create_task(run_agent_loop(session_id))

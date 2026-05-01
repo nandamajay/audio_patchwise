@@ -48,7 +48,11 @@ class PatchWiseSkill:
         self.reviews = [item.strip() for item in reviews.split(",") if item.strip()]
         if not self.reviews:
             self.reviews = ["checkpatch", "ai_code_review"]
-        self._check_installation()
+        self._patchwise_help = self._check_installation()
+        self._supports_patch_flag = "--patch" in self._patchwise_help
+        self._supports_repo_path_flag = "--repo-path" in self._patchwise_help
+        self._supports_kernel_flag = "--kernel" in self._patchwise_help
+        self.reviews = self._normalize_reviews(self.reviews)
 
     @staticmethod
     def _is_placeholder(value: str) -> bool:
@@ -70,7 +74,29 @@ class PatchWiseSkill:
             return env_key
         return ""
 
-    def _check_installation(self):
+    @staticmethod
+    def _normalize_reviews(reviews: list[str]) -> list[str]:
+        mapping = {
+            "checkpatch": "Checkpatch",
+            "aicodereview": "AiCodeReview",
+            "ai_code_review": "AiCodeReview",
+            "ai-review": "AiCodeReview",
+            "coccicheck": "Coccicheck",
+            "dtcheck": "DtCheck",
+            "dtbscheck": "DtbsCheck",
+            "llmcommitaudit": "LLMCommitAudit",
+            "llm_commit_audit": "LLMCommitAudit",
+            "sparse": "Sparse",
+        }
+        normalized: list[str] = []
+        for review in reviews:
+            key = review.strip().replace("-", "_").replace(" ", "").lower().replace("_", "")
+            canonical = mapping.get(key, review.strip())
+            if canonical and canonical not in normalized:
+                normalized.append(canonical)
+        return normalized
+
+    def _check_installation(self) -> str:
         """Verify patchwise is installed and callable."""
         try:
             result = subprocess.run(
@@ -88,6 +114,22 @@ class PatchWiseSkill:
             raise RuntimeError(
                 f"PatchWise is installed but unavailable: {(result.stderr or result.stdout).strip()}"
             )
+        return (result.stdout or "") + "\n" + (result.stderr or "")
+
+    @staticmethod
+    def _extract_commit_hashes(patch_content: str) -> list[str]:
+        seen: set[str] = set()
+        hashes: list[str] = []
+        for line in patch_content.splitlines():
+            match = re.match(r"^From\s+([0-9a-fA-F]{7,40})\s+", line.strip())
+            if not match:
+                continue
+            commit_hash = match.group(1).lower()
+            if commit_hash in seen:
+                continue
+            seen.add(commit_hash)
+            hashes.append(commit_hash)
+        return hashes
 
     def review_patch_file(
         self,
@@ -104,7 +146,7 @@ class PatchWiseSkill:
             patch_file = file_obj.name
 
         try:
-            return self._run_patchwise(patch_file, kernel_path, additional_reviews)
+            return self._run_patchwise(patch_content, patch_file, kernel_path, additional_reviews)
         finally:
             Path(patch_file).unlink(missing_ok=True)
 
@@ -120,26 +162,58 @@ class PatchWiseSkill:
 
     def _run_patchwise(
         self,
+        patch_content: str,
         patch_file: str,
         kernel_path: Optional[str],
         additional_reviews: Optional[list],
     ) -> PatchWiseResult:
         reviews = self.reviews.copy()
         if additional_reviews:
-            reviews.extend(additional_reviews)
+            reviews.extend(self._normalize_reviews([str(item) for item in additional_reviews]))
+        reviews = self._normalize_reviews(reviews)
 
-        cmd = [
-            "patchwise",
-            "--reviews",
-            *reviews,
-            "--provider",
-            self.provider,
-            "--patch",
-            patch_file,
-        ]
-
-        if kernel_path:
-            cmd.extend(["--kernel", kernel_path])
+        if self._supports_patch_flag:
+            cmd = [
+                "patchwise",
+                "--reviews",
+                *reviews,
+                "--provider",
+                self.provider,
+                "--patch",
+                patch_file,
+            ]
+            if kernel_path and self._supports_kernel_flag:
+                cmd.extend(["--kernel", kernel_path])
+        else:
+            if not kernel_path:
+                return PatchWiseResult(
+                    success=False,
+                    raw_output="",
+                    error=(
+                        "Installed patchwise CLI supports commit/repo mode only. "
+                        "Set source_path to a local kernel repo and submit patches with commit hashes."
+                    ),
+                )
+            commit_hashes = self._extract_commit_hashes(patch_content)
+            if not commit_hashes:
+                return PatchWiseResult(
+                    success=False,
+                    raw_output="",
+                    error=(
+                        "Could not infer commit hashes from patch content for commit-mode patchwise CLI."
+                    ),
+                )
+            cmd = [
+                "patchwise",
+                "--reviews",
+                *reviews,
+                "--provider",
+                self.provider,
+                "--commits",
+                *commit_hashes,
+            ]
+            if self._supports_repo_path_flag:
+                cmd.extend(["--repo-path", kernel_path])
 
         env = os.environ.copy()
         if self.api_key:
@@ -153,6 +227,7 @@ class PatchWiseSkill:
             env=env,
             timeout=300,
             check=False,
+            cwd=kernel_path if (kernel_path and not self._supports_patch_flag) else None,
         )
 
         return self._parse_output(result.stdout, result.stderr, result.returncode)
@@ -167,16 +242,21 @@ class PatchWiseSkill:
             env["OPENAI_API_KEY"] = self.api_key
         env["OPENAI_BASE_URL"] = self.provider
 
+        reviews = self._normalize_reviews(self.reviews)
+        cmd = [
+            "patchwise",
+            "--reviews",
+            *reviews,
+            "--provider",
+            self.provider,
+            "--commits",
+            commit_hash,
+        ]
+        if self._supports_repo_path_flag:
+            cmd.extend(["--repo-path", kernel_path])
+
         result = subprocess.run(
-            [
-                "patchwise",
-                "--reviews",
-                *self.reviews,
-                "--provider",
-                self.provider,
-                "--commits",
-                commit_hash,
-            ],
+            cmd,
             capture_output=True,
             text=True,
             env=env,
@@ -189,11 +269,12 @@ class PatchWiseSkill:
 
     def _parse_output(self, stdout: str, stderr: str, returncode: int) -> PatchWiseResult:
         """Parse PatchWise output into structured issue objects."""
-        if returncode != 0 and not stdout:
+        raw_output = stdout or stderr
+        if returncode != 0:
             return PatchWiseResult(
                 success=False,
-                raw_output=stderr,
-                error=f"PatchWise failed (exit {returncode}): {stderr[:500]}",
+                raw_output=raw_output,
+                error=f"PatchWise failed (exit {returncode}): {(stderr or stdout)[:500]}",
             )
 
         checkpatch_issues = []
@@ -253,6 +334,8 @@ class PatchWiseSkill:
                 "version": "patchwise-cli",
                 "provider": self.provider,
                 "reviews": self.reviews,
+                "supports_patch_flag": self._supports_patch_flag,
+                "supports_repo_path_flag": self._supports_repo_path_flag,
                 "api_key_set": bool(self.api_key),
             }
         except Exception as exc:  # pragma: no cover

@@ -9,6 +9,14 @@ from core.llm_factory import get_llm
 from models.patch_models import LineEdit, ReviewIssue
 
 
+def _ensure_list(state: dict[str, Any], key: str) -> list[Any]:
+    value = state.get(key)
+    if not isinstance(value, list):
+        value = []
+        state[key] = value
+    return value
+
+
 def _emit(state: dict[str, Any], payload: dict[str, Any]) -> None:
     callback = state.get("_stream_callback")
     if callable(callback):
@@ -310,7 +318,7 @@ def aryabhata_fix_node(state: dict[str, Any]) -> dict[str, Any]:
     )
 
     state["current_patch"] = fix_result.fixed_patch
-    state.setdefault("fix_history", []).append(
+    _ensure_list(state, "fix_history").append(
         {
             "round": round_id,
             "fixes_applied": len(fix_summary),
@@ -318,7 +326,7 @@ def aryabhata_fix_node(state: dict[str, Any]) -> dict[str, Any]:
             "validation_passed": bool(fix_result.validation_result.get("passed", False)),
         }
     )
-    state.setdefault("fix_attempts", []).append(
+    _ensure_list(state, "fix_attempts").append(
         {
             "round": round_id,
             "fixes": fix_summary,
@@ -328,7 +336,7 @@ def aryabhata_fix_node(state: dict[str, Any]) -> dict[str, Any]:
             "validation_passed": bool(fix_result.validation_result.get("passed", False)),
         }
     )
-    state.setdefault("conversation_log", []).append(
+    _ensure_list(state, "conversation_log").append(
         {
             "round": round_id,
             "agent": "aryabhata",

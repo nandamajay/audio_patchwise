@@ -1,4 +1,9 @@
-from typing import Annotated, Literal, TypedDict
+from typing import Annotated, Any, Callable, Literal, TypedDict
+
+try:
+    from typing import NotRequired
+except ImportError:  # pragma: no cover - Python <3.11
+    from typing_extensions import NotRequired
 
 from langgraph.graph.message import add_messages
 
@@ -25,3 +30,5 @@ class PatchWiseState(TypedDict):
     fix_history: list[dict]
     # LangGraph-native message accumulator for optional future prompt chaining.
     messages: Annotated[list[dict], add_messages]
+    # Runtime-only callback used for websocket streaming from agent nodes.
+    _stream_callback: NotRequired[Callable[[dict[str, Any]], None]]

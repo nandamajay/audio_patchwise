@@ -54,6 +54,15 @@ def parse_provider_model(
     runtime_provider = ""
     runtime_model = ""
 
+    if "/" in provider and not model:
+        head, tail = provider.split("/", 1)
+        provider = head.strip().lower()
+        model = tail.strip()
+    elif ":" in provider and not model:
+        head, tail = provider.split(":", 1)
+        provider = head.strip().lower()
+        model = tail.strip()
+
     if "/" in model and not provider:
         head, tail = model.split("/", 1)
         provider = head.strip().lower()

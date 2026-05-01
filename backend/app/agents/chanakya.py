@@ -55,6 +55,14 @@ _PATCHWISE_SKILL: PatchWiseSkill | None = None
 _PATCHWISE_INIT_ERROR: str | None = None
 
 
+def _ensure_list(state: dict[str, Any], key: str) -> list[Any]:
+    value = state.get(key)
+    if not isinstance(value, list):
+        value = []
+        state[key] = value
+    return value
+
+
 def _emit(state: dict[str, Any], payload: dict[str, Any]) -> None:
     callback = state.get("_stream_callback")
     if callable(callback):
@@ -479,9 +487,9 @@ def chanakya_review_node(state: PatchWiseState) -> PatchWiseState:
         "patchwise": patchwise_status,
     }
     state["latest_review"] = round_payload
-    state.setdefault("review_findings", []).append(round_payload)
-    state.setdefault("similar_patches", []).extend(similar_refs)
-    state.setdefault("conversation_log", []).append(
+    _ensure_list(state, "review_findings").append(round_payload)
+    _ensure_list(state, "similar_patches").extend(similar_refs)
+    _ensure_list(state, "conversation_log").append(
         {
             "round": round_id,
             "agent": "chanakya",
