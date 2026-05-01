@@ -6,11 +6,12 @@ import threading
 from pathlib import Path
 from typing import Any
 
-_ALLOWED_PROVIDERS = {"openai", "anthropic", "qualcomm", "mock"}
+_ALLOWED_PROVIDERS = {"qgenie", "openai", "anthropic", "qualcomm", "mock"}
 _DEFAULTS = {
-    "llm_provider": "mock",
-    "llm_model": "local",
+    "llm_provider": "qgenie",
+    "llm_model": "gpt-4o",
     "keys": {
+        "qgenie": "",
         "openai": "",
         "anthropic": "",
         "qualcomm": "",
@@ -25,7 +26,9 @@ def _secrets_path() -> Path:
 
 
 def _normalize_provider(value: str | None) -> str:
-    provider = (value or "mock").strip().lower()
+    provider = (value or "qgenie").strip().lower()
+    if provider == "qualcomm":
+        provider = "qgenie"
     if provider in {"none", "local"}:
         return "mock"
     if provider not in _ALLOWED_PROVIDERS:
@@ -37,6 +40,8 @@ def _normalize_model(value: str | None, provider: str) -> str:
     model = (value or "").strip()
     if model:
         return model
+    if provider == "qgenie":
+        return "gpt-4o"
     if provider == "openai":
         return "gpt-4o"
     if provider == "anthropic":

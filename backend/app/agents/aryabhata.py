@@ -4,12 +4,8 @@ from typing import Any
 
 from agents.aryabhata_agent import ARYABHATA_SYSTEM_PROMPT
 from agents.aryabhata_fix_engine import AryabhataFixEngine
-from app.agents.llm_bridge import (
-    LLMRuntime,
-    build_runtime_from_state,
-    invoke_text,
-    parse_line_fix_response,
-)
+from app.agents.llm_bridge import parse_line_fix_response
+from core.llm_factory import get_llm
 from models.patch_models import LineEdit, ReviewIssue
 
 
@@ -103,11 +99,11 @@ def _validation_issue(message: str, index: int, round_id: int) -> ReviewIssue:
 
 
 def _generate_targeted_fix(
-    runtime: LLMRuntime,
+    llm: Any | None,
     issue: ReviewIssue,
     current_patch: str,
 ) -> LineEdit | None:
-    if not runtime.enabled:
+    if llm is None:
         return None
 
     prompt = f"""
@@ -129,8 +125,14 @@ Current patch line at {issue.line_number}:
 {_line_at(current_patch, issue.line_number)}
 """
 
-    response = invoke_text(runtime, prompt)
-    parsed = parse_line_fix_response(response or "")
+    try:
+        response = llm.invoke(prompt)
+        content = getattr(response, "content", response)
+        if isinstance(content, list):
+            content = "\n".join(str(item) for item in content)
+        parsed = parse_line_fix_response(str(content or ""))
+    except Exception:
+        parsed = None
     if not parsed:
         return None
 
@@ -178,7 +180,20 @@ def aryabhata_fix_node(state: dict[str, Any]) -> dict[str, Any]:
         },
     )
 
-    runtime = build_runtime_from_state(state)
+    llm_provider = state.get("llm_provider")
+    llm_model = state.get("llm_model")
+    llm = None
+    fix_mode = "local"
+    try:
+        llm = get_llm(
+            model=llm_model,
+            provider=llm_provider,
+            temperature=0.2,
+            streaming=True,
+        )
+        fix_mode = f"{llm_provider or 'qgenie'}:{llm_model or 'gpt-4o'}"
+    except Exception:
+        llm = None
 
     fix_instructions: dict[str, LineEdit] = {}
     for issue in review_issues:
@@ -196,7 +211,7 @@ def aryabhata_fix_node(state: dict[str, Any]) -> dict[str, Any]:
             },
         )
 
-        line_edit = _generate_targeted_fix(runtime, issue, current_patch)
+        line_edit = _generate_targeted_fix(llm, issue, current_patch)
         if line_edit is None:
             fixed_line = _default_fixed_line(issue, current_patch)
             line_edit = LineEdit(
@@ -280,7 +295,7 @@ def aryabhata_fix_node(state: dict[str, Any]) -> dict[str, Any]:
             "validation_passed": bool(fix_result.validation_result.get("passed", False)),
             "justification": (
                 "All flagged issues were applied to concrete patch lines. "
-                f"Fix mode: {'remote ' + runtime.provider if runtime.enabled else 'local'}."
+                f"Fix mode: {fix_mode}."
             ),
         },
     )

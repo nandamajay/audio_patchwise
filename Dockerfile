@@ -33,6 +33,7 @@ RUN curl -sL https://raw.githubusercontent.com/torvalds/linux/master/scripts/spe
 WORKDIR /app/backend
 COPY backend/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir patchwise
 
 # Copy backend source
 COPY backend/ ./

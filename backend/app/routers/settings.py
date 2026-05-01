@@ -34,6 +34,8 @@ class LLMSettingsResponse(BaseModel):
 
 
 def _env_key_for_provider(provider: str) -> str:
+    if provider == "qgenie":
+        return (os.getenv("QGENIE_API_KEY") or "").strip()
     if provider == "openai":
         return (os.getenv("OPENAI_API_KEY") or os.getenv("LLM_API_KEY") or "").strip()
     if provider == "anthropic":
@@ -65,10 +67,13 @@ def _response_payload(provider: str, model: str) -> LLMSettingsResponse:
         llm_model=model,
         key_source=key_source,
         keys_present={
+            "qgenie": bool(runtime_keys.get("qgenie")) or bool(_env_key_for_provider("qgenie")),
             "openai": bool(runtime_keys.get("openai")) or bool(_env_key_for_provider("openai")),
             "anthropic": bool(runtime_keys.get("anthropic"))
             or bool(_env_key_for_provider("anthropic")),
-            "qualcomm": bool(runtime_keys.get("qualcomm")) or bool(_env_key_for_provider("qualcomm")),
+            "qualcomm": bool(runtime_keys.get("qualcomm"))
+            or bool(runtime_keys.get("qgenie"))
+            or bool(_env_key_for_provider("qgenie")),
         },
         key_masked=mask_secret(effective_key),
     )

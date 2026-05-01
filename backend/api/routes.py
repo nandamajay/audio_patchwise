@@ -5,6 +5,8 @@ import os
 from fastapi import APIRouter, BackgroundTasks
 
 from app.config import settings
+from core.llm_factory import get_available_models
+from core.patchwise_skill import PatchWiseSkill
 from feedback.feedback_manager import FeedbackManager
 from knowledge_base.lkml_targeter import LKMLTargeter
 from monitoring.health_monitor import HealthMonitor
@@ -139,3 +141,19 @@ async def rebuild_embeddings(background_tasks: BackgroundTasks):
 
     background_tasks.add_task(rebuild_all)
     return {"message": "Embedding rebuild started in background"}
+
+
+@router.get("/models")
+async def get_models():
+    """Returns available LLM models for UI dropdown — QGenie first."""
+    return get_available_models()
+
+
+@router.get("/patchwise/status")
+async def get_patchwise_status():
+    """PatchWise skill health check for System Health dashboard."""
+    try:
+        skill = PatchWiseSkill()
+        return skill.get_status()
+    except Exception as exc:
+        return {"installed": False, "error": str(exc)}

@@ -123,15 +123,22 @@ http://localhost:3000
 
 ### .env Reference
 ```env
-# LLM runtime
-# Use openai/anthropic for highest-accuracy agent reasoning.
-# Use mock for offline/local deterministic mode.
-LLM_PROVIDER=openai
-LLM_MODEL=gpt-4o
-LLM_API_KEY=
+# QGenie (primary)
+QGENIE_API_KEY=your-qgenie-api-key-here
+QGENIE_BASE_URL=https://qgenie-chat.qualcomm.com/v1
+QGENIE_DEFAULT_MODEL=gpt-4o
+
+# PatchWise skill execution
+PATCHWISE_PROVIDER=https://qgenie-chat.qualcomm.com/v1
+PATCHWISE_REVIEWS=checkpatch,ai_code_review
+
+# Fallback providers
 OPENAI_API_KEY=your_openai_key
 ANTHROPIC_API_KEY=your_anthropic_key
-QUALCOMM_API_KEY=
+
+# Active provider/model
+LLM_PROVIDER=qgenie
+LLM_MODEL=gpt-4o
 
 # Unified app port (run.sh auto-increments if busy)
 APP_PORT=7000

@@ -3,26 +3,26 @@ import GlassCard from "../components/layout/GlassCard";
 import useSessionStore from "../store/sessionStore";
 
 const PRESETS = {
+  qgenie: "gpt-4o",
   openai: "gpt-4o",
   anthropic: "claude-3-5-sonnet-latest",
-  qualcomm: "qualcomm-internal",
   mock: "local",
 };
 
 export default function SettingsPage() {
   const setField = useSessionStore((state) => state.setField);
-  const [provider, setProvider] = useState("mock");
-  const [model, setModel] = useState("local");
+  const [provider, setProvider] = useState("qgenie");
+  const [model, setModel] = useState("gpt-4o");
   const [apiKey, setApiKey] = useState("");
   const [keyMasked, setKeyMasked] = useState("");
   const [keySource, setKeySource] = useState("none");
-  const [keysPresent, setKeysPresent] = useState({ openai: false, anthropic: false, qualcomm: false });
+  const [keysPresent, setKeysPresent] = useState({ qgenie: false, openai: false, anthropic: false, qualcomm: false });
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
 
-  const currentSelection = useMemo(() => `${provider}:${model}`, [provider, model]);
+  const currentSelection = useMemo(() => `${provider}/${model}`, [provider, model]);
 
   const loadSettings = async () => {
     setLoading(true);
@@ -31,12 +31,12 @@ export default function SettingsPage() {
       const res = await fetch("/api/settings/llm");
       const data = await res.json();
       if (!res.ok) throw new Error(data?.detail || "Failed to load settings");
-      setProvider(data.llm_provider || "mock");
+      setProvider(data.llm_provider || "qgenie");
       setModel(data.llm_model || PRESETS[data.llm_provider] || "local");
       setKeyMasked(data.key_masked || "");
       setKeySource(data.key_source || "none");
-      setKeysPresent(data.keys_present || { openai: false, anthropic: false, qualcomm: false });
-      setField("llmModel", `${data.llm_provider || "mock"}:${data.llm_model || "local"}`);
+      setKeysPresent(data.keys_present || { qgenie: false, openai: false, anthropic: false, qualcomm: false });
+      setField("llmModel", `${data.llm_provider || "qgenie"}/${data.llm_model || "gpt-4o"}`);
     } catch (err) {
       setError(err.message || "Unable to load settings");
     } finally {
@@ -71,7 +71,7 @@ export default function SettingsPage() {
       setKeyMasked(data.key_masked || "");
       setKeySource(data.key_source || "none");
       setKeysPresent(data.keys_present || keysPresent);
-      setField("llmModel", `${data.llm_provider}:${data.llm_model}`);
+      setField("llmModel", `${data.llm_provider}/${data.llm_model}`);
       setMessage("LLM settings updated.");
     } catch (err) {
       setError(err.message || "Unable to save settings");
@@ -136,9 +136,9 @@ export default function SettingsPage() {
         <div className="grid" style={{ gap: 10 }}>
           <label className="small">Provider</label>
           <select className="select" value={provider} onChange={(event) => onProviderChange(event.target.value)}>
+            <option value="qgenie">QGenie</option>
             <option value="openai">OpenAI</option>
             <option value="anthropic">Anthropic</option>
-            <option value="qualcomm">Qualcomm</option>
             <option value="mock">Mock / Local</option>
           </select>
 
@@ -160,7 +160,7 @@ export default function SettingsPage() {
           </div>
 
           <div className="small" style={{ color: "var(--text-secondary)" }}>
-            Key availability: OpenAI {keysPresent.openai ? "yes" : "no"} · Anthropic {keysPresent.anthropic ? "yes" : "no"} · Qualcomm {keysPresent.qualcomm ? "yes" : "no"}
+            Key availability: QGenie {keysPresent.qgenie ? "yes" : "no"} · OpenAI {keysPresent.openai ? "yes" : "no"} · Anthropic {keysPresent.anthropic ? "yes" : "no"}
           </div>
 
           <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>

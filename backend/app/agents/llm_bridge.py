@@ -9,19 +9,22 @@ from app.security.runtime_secrets import get_runtime_api_key, get_runtime_provid
 
 
 LEGACY_MODEL_MAP: dict[str, tuple[str, str]] = {
-    "gpt-4o": ("openai", "gpt-4o"),
+    "gpt-4o": ("qgenie", "gpt-4o"),
+    "gpt-5": ("qgenie", "gpt-5"),
     "claude-3-5": ("anthropic", "claude-3-5-sonnet-latest"),
+    "claude-sonnet-4-5": ("qgenie", "claude-sonnet-4-5"),
     "claude-3-5-sonnet": ("anthropic", "claude-3-5-sonnet-latest"),
-    "qualcomm-internal": ("qualcomm", "qualcomm-internal"),
+    "qualcomm-internal": ("qgenie", "qgenie-pro"),
+    "qgenie-pro": ("qgenie", "qgenie-pro"),
     "mock": ("mock", "local"),
     "local": ("mock", "local"),
     "custom": ("mock", "local"),
 }
 
 DEFAULT_MODEL_BY_PROVIDER = {
+    "qgenie": "gpt-4o",
     "openai": "gpt-4o",
     "anthropic": "claude-3-5-sonnet-latest",
-    "qualcomm": "qualcomm-internal",
     "mock": "local",
 }
 
@@ -51,7 +54,11 @@ def parse_provider_model(
     runtime_provider = ""
     runtime_model = ""
 
-    if ":" in model and not provider:
+    if "/" in model and not provider:
+        head, tail = model.split("/", 1)
+        provider = head.strip().lower()
+        model = tail.strip()
+    elif ":" in model and not provider:
         head, tail = model.split(":", 1)
         provider = head.strip().lower()
         model = tail.strip()
@@ -69,8 +76,14 @@ def parse_provider_model(
         if not model:
             model = os.getenv("LLM_MODEL", "").strip()
 
+    if provider in {"qualcomm"}:
+        provider = "qgenie"
+
     if provider in {"local", "none"}:
         provider = "mock"
+
+    if not provider:
+        provider = os.getenv("LLM_PROVIDER", "qgenie").strip().lower()
 
     if not model:
         model = DEFAULT_MODEL_BY_PROVIDER.get(provider, "local")
@@ -86,12 +99,12 @@ def _resolve_api_key(provider: str) -> str:
     if runtime_key:
         return runtime_key
 
+    if provider == "qgenie":
+        return (os.getenv("QGENIE_API_KEY") or "").strip()
     if provider == "openai":
         return (os.getenv("OPENAI_API_KEY") or os.getenv("LLM_API_KEY") or "").strip()
     if provider == "anthropic":
         return (os.getenv("ANTHROPIC_API_KEY") or os.getenv("LLM_API_KEY") or "").strip()
-    if provider == "qualcomm":
-        return (os.getenv("QUALCOMM_API_KEY") or os.getenv("LLM_API_KEY") or "").strip()
     return ""
 
 
@@ -109,15 +122,7 @@ def build_runtime_from_state(state: dict[str, Any]) -> LLMRuntime:
             reason="mock/local mode",
         )
 
-    if provider == "qualcomm":
-        return LLMRuntime(
-            provider=provider,
-            model=model,
-            enabled=False,
-            reason="qualcomm provider not wired in this build; using local heuristics",
-        )
-
-    if provider not in {"openai", "anthropic"}:
+    if provider not in {"qgenie", "openai", "anthropic"}:
         return LLMRuntime(
             provider="mock",
             model="local",
@@ -153,6 +158,18 @@ def _build_chat_client(runtime: LLMRuntime):
         return ChatOpenAI(
             model=runtime.model,
             api_key=runtime.api_key,
+            temperature=0.0,
+            max_retries=1,
+            timeout=30,
+        )
+
+    if runtime.provider == "qgenie":
+        from langchain_openai import ChatOpenAI
+
+        return ChatOpenAI(
+            model=runtime.model,
+            api_key=runtime.api_key,
+            base_url=os.getenv("QGENIE_BASE_URL", "https://qgenie-chat.qualcomm.com/v1"),
             temperature=0.0,
             max_retries=1,
             timeout=30,

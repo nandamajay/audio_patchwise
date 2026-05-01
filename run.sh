@@ -45,8 +45,8 @@ setup_env() {
         echo ">> .env not found. Creating from .env.example..."
         cp "$ENV_EXAMPLE" "$ENV_FILE"
         echo ">> Please review .env."
-        echo ">> For highest-accuracy agent mode set LLM_PROVIDER=openai or anthropic and add API key."
-        echo ">> For offline mode set LLM_PROVIDER=mock."
+        echo ">> For highest-accuracy mode set LLM_PROVIDER=qgenie and provide QGENIE_API_KEY."
+        echo ">> OpenAI/Anthropic can be used as fallback."
         echo ">> Then run: ./run.sh start"
         exit 0
     fi
@@ -77,6 +77,7 @@ upsert_env_value() {
 provider_key_var() {
     local provider="$1"
     case "$provider" in
+        qgenie) echo "QGENIE_API_KEY" ;;
         openai) echo "OPENAI_API_KEY" ;;
         anthropic) echo "ANTHROPIC_API_KEY" ;;
         qualcomm) echo "QUALCOMM_API_KEY" ;;
@@ -87,15 +88,33 @@ provider_key_var() {
 provider_requires_key() {
     local provider="$1"
     case "$provider" in
-        openai|anthropic|qualcomm) return 0 ;;
+        qgenie|openai|anthropic|qualcomm) return 0 ;;
         *) return 1 ;;
     esac
 }
 
+is_placeholder_key() {
+    local value="${1:-}"
+    value="$(echo "$value" | tr '[:upper:]' '[:lower:]')"
+    case "$value" in
+        ""|"your-qgenie-api-key-here"|"your-openai-key-here"|"your-anthropic-key-here"|"your_api_key_here")
+            return 0
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
 prompt_for_missing_llm_key() {
-    local provider="${LLM_PROVIDER:-mock}"
+    local provider="${LLM_PROVIDER:-qgenie}"
+    provider="${provider%%/*}"
     provider="${provider%%:*}"
     provider="$(echo "$provider" | tr '[:upper:]' '[:lower:]')"
+
+    if [ "$provider" = "qualcomm" ]; then
+        provider="qgenie"
+    fi
 
     if ! provider_requires_key "$provider"; then
         return
@@ -105,7 +124,7 @@ prompt_for_missing_llm_key() {
     key_var="$(provider_key_var "$provider")"
     local provider_key="${!key_var}"
     local generic_key="${LLM_API_KEY:-}"
-    if [ -n "$provider_key" ] || [ -n "$generic_key" ]; then
+    if ! is_placeholder_key "$provider_key" || ! is_placeholder_key "$generic_key"; then
         return
     fi
 
@@ -128,14 +147,57 @@ prompt_for_missing_llm_key() {
     if [[ "$save_key" =~ ^[Yy]$ ]]; then
         upsert_env_value "$key_var" "$entered_key"
         upsert_env_value "LLM_PROVIDER" "$provider"
-        if [ -z "${LLM_MODEL:-}" ] || [ "${LLM_MODEL}" = "local" ]; then
+        if [ -z "${LLM_MODEL:-}" ] || [ "${LLM_MODEL}" = "local" ] || [ "${LLM_MODEL}" = "qualcomm-internal" ]; then
             case "$provider" in
+                qgenie) upsert_env_value "LLM_MODEL" "gpt-4o" ;;
                 openai) upsert_env_value "LLM_MODEL" "gpt-4o" ;;
                 anthropic) upsert_env_value "LLM_MODEL" "claude-3-5-sonnet-latest" ;;
                 qualcomm) upsert_env_value "LLM_MODEL" "qualcomm-internal" ;;
             esac
         fi
     fi
+}
+
+check_qgenie_and_patchwise() {
+    echo ""
+    echo "🔵 Checking QGenie connectivity..."
+    local qgenie_key=""
+    if [ -f "$ENV_FILE" ]; then
+        qgenie_key=$(grep -E '^QGENIE_API_KEY=' "$ENV_FILE" 2>/dev/null | head -n1 | cut -d= -f2-)
+    fi
+    qgenie_key="${qgenie_key%\"}"
+    qgenie_key="${qgenie_key#\"}"
+    qgenie_key="${qgenie_key%\'}"
+    qgenie_key="${qgenie_key#\'}"
+
+    if [ -z "$qgenie_key" ] || [ "$qgenie_key" = "your-qgenie-api-key-here" ]; then
+        echo "  ⚠️  WARNING: QGENIE_API_KEY not set in .env"
+        echo "  ⚠️  Agents will fall back to OPENAI_API_KEY/ANTHROPIC_API_KEY if set"
+        echo "  💡  Get your QGenie key: https://qgenie-chat.qualcomm.com"
+        echo ""
+    else
+        local qgenie_url
+        qgenie_url=$(grep -E '^QGENIE_BASE_URL=' "$ENV_FILE" 2>/dev/null | head -n1 | cut -d= -f2-)
+        qgenie_url="${qgenie_url:-https://qgenie-chat.qualcomm.com/v1}"
+        echo "  ✅ QGenie API key detected"
+        echo "  🌐 Provider: $qgenie_url"
+    fi
+
+    echo "🔧 Checking PatchWise installation..."
+    local check_image="$IMAGE_NAME"
+    if docker image inspect patchwise-backend >/dev/null 2>&1; then
+        check_image="patchwise-backend"
+    fi
+    if docker image inspect "$check_image" >/dev/null 2>&1; then
+        if docker run --rm "$check_image" patchwise --version > /dev/null 2>&1; then
+            echo "  ✅ PatchWise installed and ready"
+        else
+            echo "  ⚠️  PatchWise not found in image yet — it will be available after build/install"
+        fi
+    else
+        echo "  ℹ️  Docker image not built yet; PatchWise check will run after first build"
+    fi
+    echo ""
 }
 
 # ── Resolve port and update .env ─────────────────────────────
@@ -159,6 +221,7 @@ cmd_start() {
     print_banner
     setup_env
     prompt_for_missing_llm_key
+    check_qgenie_and_patchwise
 
     echo ">> Checking Docker image..."
     if [[ "$(docker images -q $IMAGE_NAME 2>/dev/null)" == "" ]]; then
@@ -197,6 +260,7 @@ cmd_restart() {
 cmd_rebuild() {
     setup_env
     prompt_for_missing_llm_key
+    check_qgenie_and_patchwise
     echo ">> Rebuilding PatchWise (applying .env changes)..."
     docker compose down
     docker compose build --no-cache

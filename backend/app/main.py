@@ -21,10 +21,12 @@ app.include_router(settings.router, prefix="/api")
 
 # New API namespace (inject-based extensions) is optional for backward compatibility.
 try:
+    from api.routes import router as advanced_routes
     from api.session_routes import router as session_routes
     from api.submission_routes import router as submission_routes
     from api.websocket import websocket_router
 
+    app.include_router(advanced_routes)
     app.include_router(session_routes)
     app.include_router(submission_routes)
     app.include_router(websocket_router)

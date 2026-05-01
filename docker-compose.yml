@@ -10,12 +10,16 @@ services:
       - "${APP_PORT:-7000}:${APP_PORT:-7000}"
     environment:
       - APP_PORT=${APP_PORT:-7000}
-      - LLM_PROVIDER=${LLM_PROVIDER:-openai}
+      - LLM_PROVIDER=${LLM_PROVIDER:-qgenie}
       - LLM_API_KEY=${LLM_API_KEY:-}
       - LLM_MODEL=${LLM_MODEL:-gpt-4o}
+      - QGENIE_API_KEY=${QGENIE_API_KEY:-}
+      - QGENIE_BASE_URL=${QGENIE_BASE_URL:-https://qgenie-chat.qualcomm.com/v1}
+      - QGENIE_DEFAULT_MODEL=${QGENIE_DEFAULT_MODEL:-gpt-4o}
+      - PATCHWISE_PROVIDER=${PATCHWISE_PROVIDER:-https://qgenie-chat.qualcomm.com/v1}
+      - PATCHWISE_REVIEWS=${PATCHWISE_REVIEWS:-checkpatch,ai_code_review}
       - OPENAI_API_KEY=${OPENAI_API_KEY:-}
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
-      - QUALCOMM_API_KEY=${QUALCOMM_API_KEY:-}
       - CHANAKYA_MAX_ROUNDS=${CHANAKYA_MAX_ROUNDS:-5}
       - SUBSYSTEM=${SUBSYSTEM:-audio}
       - LKML_PRESEEDED=${LKML_PRESEEDED:-false}

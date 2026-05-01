@@ -2,16 +2,18 @@ import axios from "axios";
 import { create } from "zustand";
 
 const api = axios.create({ baseURL: "/api" });
-const PROVIDERS = new Set(["openai", "anthropic", "mock", "qualcomm"]);
+const PROVIDERS = new Set(["qgenie", "openai", "anthropic", "mock", "qualcomm"]);
 
 function toSelection(config) {
   const providerRaw = String(config?.llm_provider || "").toLowerCase();
+  const provider = providerRaw === "qualcomm" ? "qgenie" : providerRaw;
   const modelRaw = String(config?.llm_model || "").trim();
 
-  if (providerRaw.includes(":")) return providerRaw;
-  if (PROVIDERS.has(providerRaw)) return `${providerRaw}:${modelRaw || "local"}`;
-  if (providerRaw) return `openai:${providerRaw}`;
-  return "openai:gpt-4o";
+  if (provider.includes("/")) return provider;
+  if (provider.includes(":")) return provider.replace(":", "/");
+  if (PROVIDERS.has(provider)) return `${provider}/${modelRaw || "gpt-4o"}`;
+  if (provider) return `qgenie/${provider}`;
+  return "qgenie/gpt-4o";
 }
 
 const useSessionStore = create((set, get) => ({
@@ -24,7 +26,7 @@ const useSessionStore = create((set, get) => ({
   kernelVersion: "6.9",
   subsystem: "alsa-asoc",
   sourcePath: "sound/soc/",
-  llmModel: "openai:gpt-4o",
+  llmModel: "qgenie/gpt-4o",
   maxRounds: 5,
   currentRound: 1,
   qualityScore: 0,
