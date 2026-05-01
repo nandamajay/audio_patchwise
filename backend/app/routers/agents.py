@@ -71,6 +71,7 @@ async def run_agent_loop(session_id: str) -> None:
 
 
 @router.websocket("/ws/agent-stream/{session_id}")
+@router.websocket("/ws/{session_id}")
 async def agent_stream(websocket: WebSocket, session_id: str) -> None:
     await connection_manager.connect(session_id, websocket)
     try:
