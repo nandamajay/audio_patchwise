@@ -263,9 +263,20 @@ cmd_rebuild() {
     check_qgenie_and_patchwise
     echo ">> Rebuilding PatchWise (applying .env changes)..."
     docker compose down
-    docker compose build --no-cache
+    docker compose build
     docker compose up -d --force-recreate
     echo ">> PatchWise rebuilt and started."
+}
+
+cmd_rebuild_clean() {
+    setup_env
+    prompt_for_missing_llm_key
+    check_qgenie_and_patchwise
+    echo ">> Rebuilding PatchWise with --no-cache..."
+    docker compose down
+    docker compose build --no-cache
+    docker compose up -d --force-recreate
+    echo ">> PatchWise clean rebuild completed."
 }
 
 cmd_logs() {
@@ -316,7 +327,8 @@ cmd_help() {
     echo "    start     Start PatchWise (auto-finds free port)"
     echo "    stop      Stop PatchWise"
     echo "    restart   Restart containers"
-    echo "    rebuild   Full rebuild (use after code or .env changes)"
+    echo "    rebuild   Rebuild using Docker cache (fast, default)"
+    echo "    rebuild-clean Full rebuild with --no-cache (slow)"
     echo "    logs      Stream container logs"
     echo "    status    Show container status + health check"
     echo "    seed      Pre-seed LKML knowledge base (ALSA/ASoC)"
@@ -340,6 +352,7 @@ case $COMMAND in
     stop)    cmd_stop ;;
     restart) cmd_restart ;;
     rebuild) cmd_rebuild ;;
+    rebuild-clean) cmd_rebuild_clean ;;
     logs)    cmd_logs ;;
     status)  cmd_status ;;
     seed)    cmd_seed ;;
