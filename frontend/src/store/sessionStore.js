@@ -39,7 +39,13 @@ const useSessionStore = create((set, get) => ({
   sessions: [],
   loadingSessions: false,
 
-  setField: (field, value) => set(() => ({ [field]: value })),
+  setField: (field, value) =>
+    set((state) => {
+      if (Object.is(state[field], value)) {
+        return state;
+      }
+      return { [field]: value };
+    }),
   setSession: (payload) => set(() => ({ ...payload })),
   setCurrentSession: (sessionId) => set(() => ({ currentSessionId: sessionId, sessionId })),
 

@@ -1,4 +1,4 @@
-import { useMemo } from "react";
+import { useCallback, useMemo } from "react";
 import { useNavigate } from "react-router-dom";
 
 import AryabhataAvatar from "../components/agents/AryabhataAvatar";
@@ -34,6 +34,31 @@ export default function InputConfig() {
     if (!sourcePath.trim()) missing.push("source path");
     return missing;
   }, [patchInput, kernelVersion, subsystem, sourcePath]);
+
+  const contextValue = useMemo(
+    () => ({ subsystem, kernelVersion, sourcePath, notes: "" }),
+    [subsystem, kernelVersion, sourcePath],
+  );
+
+  const handleContextChange = useCallback(
+    (data) => {
+      const nextSubsystem = data?.subsystem || "";
+      const nextKernelVersion = data?.kernelVersion || "";
+      const nextSourcePath = data?.sourcePath || "";
+
+      if (nextSubsystem !== subsystem) setField("subsystem", nextSubsystem);
+      if (nextKernelVersion !== kernelVersion) setField("kernelVersion", nextKernelVersion);
+      if (nextSourcePath !== sourcePath) setField("sourcePath", nextSourcePath);
+    },
+    [setField, subsystem, kernelVersion, sourcePath],
+  );
+
+  const handleLlmModelChange = useCallback(
+    (value) => {
+      if (value !== llmModel) setField("llmModel", value);
+    },
+    [setField, llmModel],
+  );
 
   const onStart = async () => {
     if (missingContext.length) return;
@@ -71,18 +96,14 @@ export default function InputConfig() {
       <div className="grid grid-2">
         <ContextBox
           patchContent={patchInput}
-          value={{ subsystem, kernelVersion, sourcePath, notes: "" }}
-          onChange={(data) => {
-            setField("subsystem", data.subsystem || "");
-            setField("kernelVersion", data.kernelVersion || "");
-            setField("sourcePath", data.sourcePath || "");
-          }}
+          value={contextValue}
+          onChange={handleContextChange}
         />
 
         <GlassCard>
           <h3 style={{ marginBottom: 10 }}>Configuration</h3>
           <div className="grid" style={{ gap: 10 }}>
-            <LLMDropdown value={llmModel} onChange={(value) => setField("llmModel", value)} />
+            <LLMDropdown value={llmModel} onChange={handleLlmModelChange} />
             <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
               <p className="small">
                 Configure API keys securely in Settings.

@@ -27,6 +27,27 @@ export default function ContextBox({ patchContent, value, onChange }) {
   });
 
   useEffect(() => {
+    setContextData((prev) => {
+      const next = {
+        ...prev,
+        subsystem: value.subsystem || "",
+        kernelVersion: value.kernelVersion || "",
+        sourcePath: value.sourcePath || "",
+        notes: value.notes || "",
+      };
+      if (
+        next.subsystem === prev.subsystem &&
+        next.kernelVersion === prev.kernelVersion &&
+        next.sourcePath === prev.sourcePath &&
+        next.notes === prev.notes
+      ) {
+        return prev;
+      }
+      return next;
+    });
+  }, [value.subsystem, value.kernelVersion, value.sourcePath, value.notes]);
+
+  useEffect(() => {
     if (patchContent) {
       const subsystem = detectSubsystem(patchContent);
       const kernelVersion = extractKernelVersion(patchContent);
@@ -43,8 +64,19 @@ export default function ContextBox({ patchContent, value, onChange }) {
   }, [patchContent]);
 
   useEffect(() => {
-    onChange?.(contextData);
-  }, [contextData, onChange]);
+    onChange?.({
+      subsystem: contextData.subsystem,
+      kernelVersion: contextData.kernelVersion,
+      sourcePath: contextData.sourcePath,
+      notes: contextData.notes,
+    });
+  }, [
+    contextData.subsystem,
+    contextData.kernelVersion,
+    contextData.sourcePath,
+    contextData.notes,
+    onChange,
+  ]);
 
   const helper = useMemo(() => {
     if (contextData.autoDetected) return "Auto-detected from patch content. Adjust if needed.";
