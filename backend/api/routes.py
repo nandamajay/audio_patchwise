@@ -5,6 +5,7 @@ import os
 from fastapi import APIRouter
 
 from app.config import settings
+from feedback.feedback_manager import FeedbackManager
 from knowledge_base.lkml_targeter import LKMLTargeter
 from submission.dry_run import CheckStatus, DryRunManager
 
@@ -91,3 +92,27 @@ async def seed_targeted(payload: dict):
         months_back=payload.get("months_back", 24),
     )
     return result
+
+
+@router.post("/feedback/vote")
+async def record_vote(payload: dict):
+    """Record upvote or downvote feedback for an agent message."""
+    feedback_manager = FeedbackManager()
+    result = await feedback_manager.record_feedback(
+        session_id=payload["session_id"],
+        round_num=payload["round_num"],
+        agent=payload["agent"],
+        message_id=payload["message_id"],
+        message_content=payload["message_content"],
+        vote=payload["vote"],
+        comment=payload.get("comment"),
+        issue_type=payload.get("issue_type"),
+        subsystem=payload.get("subsystem", "audio"),
+    )
+    return result
+
+
+@router.get("/feedback/leaderboard")
+async def feedback_leaderboard():
+    feedback_manager = FeedbackManager()
+    return {"leaderboard": feedback_manager.get_leaderboard()}
