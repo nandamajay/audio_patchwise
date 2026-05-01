@@ -1,8 +1,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Optional
 
 from agents.chanakya_agent import CHANAKYA_ISSUE_FORMAT_PROMPT
 from app.agents.state import PatchWiseState
@@ -10,6 +9,8 @@ from app.skills.patchwise_skill import full_patch_analysis
 from app.skills.search_skill import SearchSkill
 from core.llm_factory import get_llm
 from core.patchwise_skill import PatchWiseResult, PatchWiseSkill
+from intelligence.cover_letter_reviewer import CoverLetterReviewer
+from intelligence.patch_version_intelligence import PatchVersionIntelligence
 
 
 CHANAKYA_SYSTEM_PROMPT = (
@@ -18,39 +19,8 @@ CHANAKYA_SYSTEM_PROMPT = (
     + CHANAKYA_ISSUE_FORMAT_PROMPT
 )
 
-
-@dataclass
-class IssueHistory:
-    count: int
-    first_round: int
-    last_round: int
-    issue_id: str
-
-
-@dataclass
-class IssueTracker:
-    issue_history: dict[str, IssueHistory] = field(default_factory=dict)
-
-    def _key(self, issue: dict[str, Any]) -> str:
-        return f"{issue.get('category')}|{issue.get('line_number')}|{issue.get('error_message')[:80]}"
-
-    def track(self, issue: dict[str, Any], round_num: int) -> tuple[bool, int | None]:
-        key = self._key(issue)
-        if key not in self.issue_history:
-            self.issue_history[key] = IssueHistory(
-                count=1,
-                first_round=round_num,
-                last_round=round_num,
-                issue_id=issue["issue_id"],
-            )
-            return False, None
-        history = self.issue_history[key]
-        history.count += 1
-        history.last_round = round_num
-        return True, history.first_round
-
-
-_ISSUE_TRACKERS: dict[str, IssueTracker] = {}
+pvi = PatchVersionIntelligence()
+cover_reviewer = CoverLetterReviewer()
 _PATCHWISE_SKILL: PatchWiseSkill | None = None
 _PATCHWISE_INIT_ERROR: str | None = None
 
@@ -125,17 +95,9 @@ def _category(bucket: str) -> str:
     return mapping.get(bucket, "STYLE")
 
 
-def _next_severity(severity: str) -> str:
-    if severity == "INFO":
-        return "WARNING"
-    if severity == "WARNING":
-        return "CRITICAL"
-    return "CRITICAL"
-
-
 def _default_fix(problematic: str, issue: dict[str, Any]) -> str:
     suggestion = (issue.get("suggestion") or issue.get("suggested_fix") or "").strip()
-    issue_type = issue.get("issue_type", "")
+    issue_type = issue.get("issue_type", issue.get("type", ""))
     if suggestion and suggestion != problematic:
         return suggestion
     if issue_type == "STYLE":
@@ -159,7 +121,7 @@ def _extract_json(text: str) -> Any | None:
     candidates = [text]
     first_brace = text.find("{")
     first_bracket = text.find("[")
-    idxs = [i for i in (first_brace, first_bracket) if i >= 0]
+    idxs = [idx for idx in (first_brace, first_bracket) if idx >= 0]
     if idxs:
         candidates.append(text[min(idxs):])
 
@@ -230,11 +192,7 @@ def _analyses_from_patchwise(pw_result: PatchWiseResult) -> dict[str, list[dict[
     return analyses
 
 
-def _build_review_prompt(
-    patch_text: str,
-    pw_result: PatchWiseResult,
-    state: PatchWiseState,
-) -> str:
+def _build_review_prompt(patch_text: str, pw_result: PatchWiseResult, state: PatchWiseState) -> str:
     return f"""You are CHANAKYA, a senior Linux kernel reviewer specializing
 in ALSA/ASoC audio subsystem patches for Qualcomm.
 
@@ -320,6 +278,7 @@ def _enrich_issues_with_remote_llm(
         for item in parsed
         if isinstance(item, dict) and isinstance(item.get("issue_id"), str)
     }
+
     for issue in structured_issues:
         update = by_id.get(issue["issue_id"])
         if not update:
@@ -337,14 +296,120 @@ def _enrich_issues_with_remote_llm(
     return structured_issues, analysis_mode
 
 
-def chanakya_review_node(state: PatchWiseState) -> PatchWiseState:
+def find_matching_issue(issue: dict[str, Any], prev_issues: list[dict[str, Any]]) -> Optional[dict[str, Any]]:
+    for prev in prev_issues:
+        same_type = prev.get("category") == issue.get("category")
+        same_problem = prev.get("problematic_code", "").strip() == issue.get("problematic_code", "").strip()
+        near_line = abs(int(prev.get("line_number", 0) or 0) - int(issue.get("line_number", 0) or 0)) <= 1
+        if same_type and (same_problem or near_line):
+            return prev
+    return None
+
+
+def check_fix_attempted(issue: dict[str, Any], changes_made: list[dict[str, Any]]) -> bool:
+    for change in changes_made:
+        type_match = (change.get("issue_type") == issue.get("category")) or (
+            change.get("issue_type") == issue.get("type")
+        )
+        near_line = abs(int(change.get("line", 0) or 0) - int(issue.get("line_number", 0) or 0)) <= 2
+        if type_match and near_line:
+            return True
+    return False
+
+
+def detect_fix_failure_reason(issue: dict[str, Any], prev_fix: Optional[dict[str, Any]]) -> str:
+    if not prev_fix:
+        return "No previous fix payload available"
+    if not prev_fix.get("validation_passed", True):
+        return "Previous fix attempt failed validation"
+    return f"Prior change did not resolve the issue at line {issue.get('line_number', 'unknown')}"
+
+
+def _extract_cover_letter_and_series(patch_text: str) -> tuple[Optional[str], list[str]]:
+    import re
+
+    cover_letter = None
+    if "Subject:" in patch_text and " 0/" in patch_text and "[PATCH" in patch_text:
+        cover_letter = patch_text
+
+    patch_subjects: list[str] = []
+    for line in patch_text.splitlines():
+        if line.startswith("Subject:") and "[PATCH" in line and re.search(r"\[PATCH[^\]]*\s+\d+/\d+\]", line):
+            patch_subjects.append(line)
+
+    if not patch_subjects:
+        return cover_letter, [patch_text]
+    return cover_letter, patch_subjects
+
+
+async def _run_version_pre_review(state: PatchWiseState, round_id: int) -> list[dict[str, Any]]:
+    session_id = state.get("session_id", "")
+    patch_text = state.get("current_patch") or state.get("patch_input", "")
+
+    _emit_tokens(state, "chanakya", "thinking", round_id, "Detecting patch version and prior review history.")
+
+    chain = await pvi.analyze_patch_version(patch_text, session_id)
+    if not chain:
+        _emit(
+            state,
+            {
+                "agent": "chanakya",
+                "type": "info",
+                "round": round_id,
+                "content": "No previous version history found. Reviewing patch standalone.",
+            },
+        )
+        return []
+
+    _emit(
+        state,
+        {
+            "agent": "chanakya",
+            "type": "version_history",
+            "round": round_id,
+            "content": (
+                f"Detected v{chain.latest_version}; found {len(chain.unaddressed_comments)} "
+                "unaddressed prior comments"
+            ),
+            "metadata": {
+                "latest_version": chain.latest_version,
+                "unaddressed_count": len(chain.unaddressed_comments),
+                "addressed_count": len(chain.addressed_comments),
+                "maintainers": chain.maintainers,
+            },
+        },
+    )
+
+    version_issues: list[dict[str, Any]] = []
+    for comment in chain.unaddressed_comments:
+        version_issues.append(
+            {
+                "issue_type": "COMPLIANCE",
+                "severity": "CRITICAL" if comment.reviewer_type == "MAINTAINER" else "INFO",
+                "line_number": 1,
+                "description": f"Unaddressed review feedback from {comment.reviewer_name}",
+                "suggestion": pvi.generate_suggested_reply(comment, fix_applied=False),
+                "explanation": comment.comment_text[:500],
+                "reviewer_name": comment.reviewer_name,
+                "reviewer_email": comment.reviewer_email,
+                "reviewer_type": comment.reviewer_type,
+                "message_id": comment.message_id,
+            }
+        )
+
+    state["version_chain"] = {
+        "latest_version": chain.latest_version,
+        "maintainers": chain.maintainers,
+        "unaddressed_count": len(chain.unaddressed_comments),
+    }
+    return version_issues
+
+
+async def chanakya_review_node(state: PatchWiseState) -> PatchWiseState:
     round_id = state.get("current_round", 1)
     patch_text = state.get("current_patch") or state.get("patch_input", "")
     source_context = state.get("source_path", "")
-    session_id = state.get("session_id", "default")
     patch_lines = patch_text.splitlines()
-
-    tracker = _ISSUE_TRACKERS.setdefault(session_id, IssueTracker())
 
     hint = state.get("interrupt_hint")
     thinking = "Analyzing with PatchWise (checkpatch + ai_code_review) and QGenie deep review."
@@ -378,60 +443,108 @@ def chanakya_review_node(state: PatchWiseState) -> PatchWiseState:
     else:
         analyses = full_patch_analysis(patch_text, source_context)
 
+    version_issues = await _run_version_pre_review(state, round_id)
     similar_refs = SearchSkill().search(
         patch_text,
         subsystem=state.get("subsystem", "alsa-asoc"),
         sources=["lkml", "gerrit", "local"],
     )
 
+    cover_letter, patch_series = _extract_cover_letter_and_series(patch_text)
+    cover_issues = cover_reviewer.review(cover_letter, patch_series)
+    if cover_issues:
+        _emit(
+            state,
+            {
+                "agent": "chanakya",
+                "type": "cover_letter_review",
+                "round": round_id,
+                "content": f"Cover-letter review found {len(cover_issues)} issue(s).",
+                "metadata": {
+                    "issue_count": len(cover_issues),
+                    "template": cover_reviewer.generate_cover_letter_template(patch_series),
+                },
+            },
+        )
+
     structured_issues: list[dict[str, Any]] = []
     issue_counter = 1
+
+    def append_issue(raw_issue: dict[str, Any], category: str) -> None:
+        nonlocal issue_counter
+        line_number = int(raw_issue.get("line_number", 1) or 1)
+        hunk_context, problematic = _line_context(patch_lines, line_number)
+        file_path = _current_file_path(patch_lines, line_number)
+        issue_id = f"R{round_id}_{issue_counter:03d}"
+        issue_counter += 1
+
+        issue = {
+            "issue_id": issue_id,
+            "category": category,
+            "severity": raw_issue.get("severity", "WARNING"),
+            "line_number": line_number,
+            "file_path": file_path,
+            "hunk_context": hunk_context,
+            "error_message": raw_issue.get("description", ""),
+            "problematic_code": problematic,
+            "suggested_fix": _default_fix(problematic, raw_issue),
+            "explanation": (
+                f"{raw_issue.get('description', '')}. "
+                f"Upstream expectation: {raw_issue.get('suggestion', 'apply canonical kernel style and logic fixes')}."
+            ),
+            "reference": (
+                "https://www.kernel.org/doc/html/latest/process/submitting-patches.html"
+                if category in {"COMMIT", "COMPLIANCE"}
+                else None
+            ),
+            "is_recurring": False,
+            "previous_round": None,
+            "first_seen_round": round_id,
+            "round_number": round_id,
+            "similar_patch_refs": similar_refs[:2],
+        }
+
+        for key in ["reviewer_name", "reviewer_email", "reviewer_type", "message_id"]:
+            if raw_issue.get(key):
+                issue[key] = raw_issue[key]
+
+        structured_issues.append(issue)
+
     for bucket, items in analyses.items():
         category = _category(bucket)
-        for raw_issue in items:
-            line_number = int(raw_issue.get("line_number", 1) or 1)
-            hunk_context, problematic = _line_context(patch_lines, line_number)
-            file_path = _current_file_path(patch_lines, line_number)
-            issue_id = f"R{round_id}_{issue_counter:03d}"
-            issue_counter += 1
+        for raw in items:
+            append_issue(raw, category)
 
-            issue = {
-                "issue_id": issue_id,
-                "category": category,
-                "severity": raw_issue.get("severity", "WARNING"),
-                "line_number": line_number,
-                "file_path": file_path,
-                "hunk_context": hunk_context,
-                "error_message": raw_issue.get("description", ""),
-                "problematic_code": problematic,
-                "suggested_fix": _default_fix(problematic, raw_issue),
-                "explanation": (
-                    f"{raw_issue.get('description', '')}. "
-                    f"Upstream expectation: {raw_issue.get('suggestion', 'apply canonical kernel style and logic fixes')}."
-                ),
-                "reference": (
-                    "https://www.kernel.org/doc/html/latest/process/submitting-patches.html"
-                    if category in {"COMMIT", "COMPLIANCE"}
-                    else None
-                ),
-                "is_recurring": False,
-                "previous_round": None,
-                "round_number": round_id,
-            }
+    for raw in cover_issues:
+        append_issue(raw, "COMPLIANCE")
 
-            recurring, first_round = tracker.track(issue, round_id)
-            if recurring:
-                issue["is_recurring"] = True
-                issue["previous_round"] = first_round
-                issue["severity"] = _next_severity(issue["severity"])
-                issue["explanation"] = (
-                    f"ARYABHATA failed to address this in Round {first_round}. "
-                    f"The fix MUST modify line {line_number} to: {issue['suggested_fix']}. "
-                    f"{issue['explanation']}"
-                )
+    for raw in version_issues:
+        append_issue(raw, "COMPLIANCE")
 
-            issue["similar_patch_refs"] = similar_refs[:2]
-            structured_issues.append(issue)
+    prev_issues = state.get("previous_round_issues", [])
+    fix_history = state.get("fix_history", [])
+    prev_fix = fix_history[-1] if fix_history else None
+
+    for issue in structured_issues:
+        matching_prev = find_matching_issue(issue, prev_issues)
+        if not matching_prev:
+            continue
+
+        issue["is_recurring"] = True
+        issue["previous_round"] = matching_prev.get("first_seen_round", round_id - 1)
+        issue["first_seen_round"] = issue["previous_round"]
+
+        attempted = check_fix_attempted(issue, prev_fix.get("changes_made", []) if isinstance(prev_fix, dict) else [])
+        if attempted:
+            issue["fix_attempted"] = True
+            issue["fix_failed_reason"] = detect_fix_failure_reason(issue, prev_fix)
+        else:
+            issue["missed_fix"] = True
+
+        if issue["severity"] == "INFO":
+            issue["severity"] = "WARNING"
+
+    state["previous_round_issues"] = [dict(item) for item in structured_issues]
 
     structured_issues, analysis_mode = _enrich_issues_with_remote_llm(
         state=state,
@@ -453,7 +566,10 @@ def chanakya_review_node(state: PatchWiseState) -> PatchWiseState:
                     "line_number": issue["line_number"],
                     "issue_id": issue["issue_id"],
                     "recurring": issue["is_recurring"],
-                    "first_seen": issue["previous_round"],
+                    "first_seen": issue["first_seen_round"],
+                    "missed_fix": issue.get("missed_fix", False),
+                    "fix_attempted": issue.get("fix_attempted", False),
+                    "fix_failed_reason": issue.get("fix_failed_reason"),
                     "analysis_mode": analysis_mode,
                     "patchwise": patchwise_status,
                     "issue": issue,
@@ -468,14 +584,27 @@ def chanakya_review_node(state: PatchWiseState) -> PatchWiseState:
                 "agent": "chanakya",
                 "type": "similar_patch",
                 "round": round_id,
-                "content": ref["title"],
+                "content": ref.get("title", ""),
                 "metadata": ref,
             },
         )
 
+    critical_issues = [issue for issue in structured_issues if issue.get("severity") == "CRITICAL"]
     issue_count = len(structured_issues)
     quality_score = max(0.0, 100.0 - float(issue_count * 14))
-    verdict = "LGTM" if issue_count == 0 else "NEEDS_WORK"
+    verdict = "LGTM" if not structured_issues else "NEEDS_WORK"
+
+    if structured_issues and not critical_issues and round_id >= 2:
+        _emit(
+            state,
+            {
+                "agent": "chanakya",
+                "type": "minor_issues_only",
+                "round": round_id,
+                "content": "Only non-critical issues remain.",
+                "metadata": {"issue_count": issue_count},
+            },
+        )
 
     round_payload = {
         "round": round_id,
@@ -486,6 +615,7 @@ def chanakya_review_node(state: PatchWiseState) -> PatchWiseState:
         "analysis_mode": analysis_mode,
         "patchwise": patchwise_status,
     }
+
     state["latest_review"] = round_payload
     _ensure_list(state, "review_findings").append(round_payload)
     _ensure_list(state, "similar_patches").extend(similar_refs)
@@ -497,6 +627,7 @@ def chanakya_review_node(state: PatchWiseState) -> PatchWiseState:
             "findings": structured_issues,
         }
     )
+
     state["quality_score"] = quality_score
     state["verdict"] = verdict
 

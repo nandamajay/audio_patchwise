@@ -1,8 +1,45 @@
+from __future__ import annotations
+
+import logging
+import os
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI
 
 from app.routers import agents, interrupt, output, patch, session, settings
+from database import init_db
+from knowledge.chroma_manager import start_write_worker
+from routes import scheduler_routes
+from scheduler import scheduler, start_scheduler
+from startup_recovery import run_startup_recovery
 
-app = FastAPI(title="PatchWise API", version="1.0.0")
+logger = logging.getLogger(__name__)
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    init_db()
+    await start_write_worker()
+
+    schedule_preset = os.getenv("SEED_SCHEDULE", "every_sunday_night")
+    start_scheduler(schedule_preset)
+
+    try:
+        await run_startup_recovery()
+    except Exception as exc:
+        logger.warning("[PatchWise] Startup recovery failed: %s", exc)
+
+    if not any(route.path.startswith("/api/scheduler") for route in app.routes):
+        app.include_router(scheduler_routes.router)
+
+    logger.info("[PatchWise] All services started - ready for concurrent users")
+    yield
+    if scheduler.running:
+        scheduler.shutdown()
+    logger.info("[PatchWise] Shutdown complete")
+
+
+app = FastAPI(title="PatchWise API", version="1.0.0", lifespan=lifespan)
 
 # Legacy routes
 app.include_router(session.router)
@@ -20,13 +57,6 @@ app.include_router(output.router, prefix="/api")
 app.include_router(settings.router, prefix="/api")
 
 # New API namespace (inject-based extensions) is optional for backward compatibility.
-try:
-    from api.routes import router as advanced_routes
-
-    app.include_router(advanced_routes)
-except Exception:
-    pass
-
 try:
     from api.session_routes import router as session_routes
 
@@ -53,6 +83,39 @@ try:
     from routers.patch_input import router as patch_input_router
 
     app.include_router(patch_input_router)
+except Exception:
+    pass
+
+try:
+    from routers.history import router as history_router
+
+    app.include_router(history_router)
+except Exception:
+    pass
+
+try:
+    from api.routes import router as advanced_router
+
+    app.include_router(advanced_router)
+except Exception:
+    pass
+
+try:
+    from api.knowledge_routes import router as knowledge_router
+
+    app.include_router(knowledge_router)
+except Exception:
+    pass
+
+# Inject 14 routes.
+try:
+    from api.collab_routes import router as collab_router
+    from api.rebase_routes import router as rebase_router
+    from api.secrets_routes import router as secrets_router
+
+    app.include_router(rebase_router)
+    app.include_router(collab_router)
+    app.include_router(secrets_router)
 except Exception:
     pass
 

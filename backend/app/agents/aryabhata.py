@@ -6,6 +6,7 @@ from agents.aryabhata_agent import ARYABHATA_SYSTEM_PROMPT
 from agents.aryabhata_fix_engine import AryabhataFixEngine
 from app.agents.llm_bridge import parse_line_fix_response
 from core.llm_factory import get_llm
+from intelligence.cover_letter_reviewer import CoverLetterReviewer
 from models.patch_models import LineEdit, ReviewIssue
 
 
@@ -106,11 +107,7 @@ def _validation_issue(message: str, index: int, round_id: int) -> ReviewIssue:
     )
 
 
-def _generate_targeted_fix(
-    llm: Any | None,
-    issue: ReviewIssue,
-    current_patch: str,
-) -> LineEdit | None:
+def _generate_targeted_fix(llm: Any | None, issue: ReviewIssue, current_patch: str) -> LineEdit | None:
     if llm is None:
         return None
 
@@ -144,9 +141,7 @@ Current patch line at {issue.line_number}:
     if not parsed:
         return None
 
-    original_line = parsed.original_line or issue.problematic_code or _line_at(
-        current_patch, issue.line_number
-    )
+    original_line = parsed.original_line or issue.problematic_code or _line_at(current_patch, issue.line_number)
     if not parsed.fixed_line:
         return None
 
@@ -169,10 +164,7 @@ def aryabhata_fix_node(state: dict[str, Any]) -> dict[str, Any]:
     latest_review = state.get("latest_review", {})
     raw_issues = latest_review.get("issues") or latest_review.get("findings") or []
 
-    review_issues = [
-        _coerce_issue(raw, idx + 1, round_id, current_patch)
-        for idx, raw in enumerate(raw_issues)
-    ]
+    review_issues = [_coerce_issue(raw, idx + 1, round_id, current_patch) for idx, raw in enumerate(raw_issues)]
 
     if not review_issues:
         state["verdict"] = "LGTM"
@@ -193,12 +185,7 @@ def aryabhata_fix_node(state: dict[str, Any]) -> dict[str, Any]:
     llm = None
     fix_mode = "local"
     try:
-        llm = get_llm(
-            model=llm_model,
-            provider=llm_provider,
-            temperature=0.2,
-            streaming=True,
-        )
+        llm = get_llm(model=llm_model, provider=llm_provider, temperature=0.2, streaming=True)
         fix_mode = f"{llm_provider or 'qgenie'}:{llm_model or 'gpt-4o'}"
     except Exception:
         llm = None
@@ -221,11 +208,10 @@ def aryabhata_fix_node(state: dict[str, Any]) -> dict[str, Any]:
 
         line_edit = _generate_targeted_fix(llm, issue, current_patch)
         if line_edit is None:
-            fixed_line = _default_fixed_line(issue, current_patch)
             line_edit = LineEdit(
                 line_number=issue.line_number,
                 original_line=issue.problematic_code or _line_at(current_patch, issue.line_number),
-                fixed_line=fixed_line,
+                fixed_line=_default_fixed_line(issue, current_patch),
                 issue_id=issue.issue_id,
                 category=issue.category,
                 justification=issue.explanation or "Applied targeted upstream-safe correction.",
@@ -277,6 +263,22 @@ def aryabhata_fix_node(state: dict[str, Any]) -> dict[str, Any]:
                 llm_fixes=validation_fixes,
             )
 
+    cover_template = None
+    if any("cover letter" in (issue.error_message or "").lower() for issue in review_issues):
+        cover_template = CoverLetterReviewer().generate_cover_letter_template([current_patch])
+
+    changes_made = [
+        {
+            "issue_id": issue.issue_id,
+            "issue_type": issue.category,
+            "line": issue.line_number,
+            "original": fix_instructions[issue.issue_id].original_line,
+            "fixed": fix_instructions[issue.issue_id].fixed_line,
+            "reason": fix_instructions[issue.issue_id].justification,
+        }
+        for issue in review_issues
+    ]
+
     fix_summary = [
         {
             "issue_id": issue.issue_id,
@@ -297,14 +299,53 @@ def aryabhata_fix_node(state: dict[str, Any]) -> dict[str, Any]:
             "round": round_id,
             "content": f"Applied {len(fix_summary)} fixes",
             "fix_summary": fix_summary,
+            "changes_made": changes_made,
             "diff_from_previous": fix_result.diff_from_previous,
             "fixed_patch": fix_result.fixed_patch,
+            "original_patch": current_patch,
             "checkpatch_output": fix_result.validation_result.get("checkpatch_output", ""),
             "validation_passed": bool(fix_result.validation_result.get("passed", False)),
             "justification": (
                 "All flagged issues were applied to concrete patch lines. "
                 f"Fix mode: {fix_mode}."
             ),
+            "patch_marker_start": "<<<FIXED_PATCH_START>>>",
+            "patch_marker_end": "<<<FIXED_PATCH_END>>>",
+            "marked_patch": (
+                "<<<FIXED_PATCH_START>>>\n"
+                f"{fix_result.fixed_patch}"
+                "<<<FIXED_PATCH_END>>>"
+            ),
+            "requires_approval": bool(cover_template),
+            "cover_letter_template": cover_template,
+            "issue_fixes": [
+                {
+                    "issue_id": issue.issue_id,
+                    "type": issue.category,
+                    "line": issue.line_number,
+                    "original": issue.problematic_code,
+                    "fix_applied": fix_instructions[issue.issue_id].fixed_line,
+                    "reason": fix_instructions[issue.issue_id].justification,
+                }
+                for issue in review_issues
+            ],
+        },
+    )
+
+    _emit(
+        state,
+        {
+            "agent": "aryabhata",
+            "type": "aryabhata_fix",
+            "round": round_id,
+            "content": "ARYABHATA produced fixed patch output.",
+            "fixed_patch": fix_result.fixed_patch,
+            "original_patch": current_patch,
+            "changes_made": changes_made,
+            "validation_passed": bool(fix_result.validation_result.get("passed", False)),
+            "checkpatch_output": fix_result.validation_result.get("checkpatch_output", ""),
+            "patch_marker_start": "<<<FIXED_PATCH_START>>>",
+            "patch_marker_end": "<<<FIXED_PATCH_END>>>",
         },
     )
 
@@ -322,6 +363,7 @@ def aryabhata_fix_node(state: dict[str, Any]) -> dict[str, Any]:
         {
             "round": round_id,
             "fixes_applied": len(fix_summary),
+            "changes_made": changes_made,
             "diff": fix_result.diff_from_previous,
             "validation_passed": bool(fix_result.validation_result.get("passed", False)),
         }
@@ -330,10 +372,14 @@ def aryabhata_fix_node(state: dict[str, Any]) -> dict[str, Any]:
         {
             "round": round_id,
             "fixes": fix_summary,
+            "changes_made": changes_made,
             "summary": f"Applied {len(fix_summary)} fix(es).",
             "diff_from_previous": fix_result.diff_from_previous,
             "fixed_patch": fix_result.fixed_patch,
+            "original_patch": current_patch,
             "validation_passed": bool(fix_result.validation_result.get("passed", False)),
+            "patch_marker_start": "<<<FIXED_PATCH_START>>>",
+            "patch_marker_end": "<<<FIXED_PATCH_END>>>",
         }
     )
     _ensure_list(state, "conversation_log").append(

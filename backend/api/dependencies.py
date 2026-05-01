@@ -7,6 +7,12 @@ from session.session_manager import SessionManager
 from submission.submission_engine import SubmissionEngine
 
 
-sqlite_store = SQLiteStore(db_path=os.getenv("SQLITE_DB_PATH", "./data/sqlite/patchwise.db"))
+sqlite_store = SQLiteStore(
+    db_path=(
+        os.getenv("SQLITE_PATH")
+        or os.getenv("SQLITE_DB_PATH")
+        or "./data/sqlite/patchwise.db"
+    )
+)
 session_manager = SessionManager(sqlite_store)
 engine = SubmissionEngine(dict(os.environ), session_manager)

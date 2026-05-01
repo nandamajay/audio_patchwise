@@ -42,7 +42,7 @@ export default function AgentBubble({ message, sessionId }) {
           <AryabhataMessage message={message} />
         ) : null}
 
-        {message.type === "fix_complete" ? (
+        {["fix_complete", "aryabhata_fix"].includes(message.type) ? (
           <AryabhataFixMessage message={message} />
         ) : null}
 

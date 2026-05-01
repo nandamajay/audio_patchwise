@@ -28,6 +28,10 @@ class PatchWiseState(TypedDict):
     quality_score: float
     latest_review: dict
     fix_history: list[dict]
+    previous_round_issues: NotRequired[list[dict]]
+    version_chain: NotRequired[dict]
+    version_issues: NotRequired[list[dict]]
+    user_hints: NotRequired[list[dict]]
     # LangGraph-native message accumulator for optional future prompt chaining.
     messages: Annotated[list[dict], add_messages]
     # Runtime-only callback used for websocket streaming from agent nodes.

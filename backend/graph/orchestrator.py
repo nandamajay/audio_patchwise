@@ -77,7 +77,7 @@ async def chanakya_node(state: dict[str, Any], config: dict) -> dict[str, Any]:
     del config
     session_id = state["session_id"]
 
-    reviewed = chanakya_review_node(state)
+    reviewed = await chanakya_review_node(state)
 
     hint = await interrupt_handler.wait_for_resume(session_id)
 
@@ -163,6 +163,8 @@ async def run_session_loop(session_id: str) -> None:
         "quality_score": session.review_report.get("quality_score", 0.0) if session.review_report else 0.0,
         "latest_review": {},
         "fix_history": [],
+        "previous_round_issues": session.review_report.get("previous_round_issues", []) if session.review_report else [],
+        "version_issues": [],
         "messages": [],
         "user_hints": [],
     }
@@ -298,6 +300,7 @@ async def run_session_loop(session_id: str) -> None:
                 "fix_attempts": state.get("fix_attempts", []),
                 "similar_patches": state.get("similar_patches", []),
                 "quality_score": state.get("quality_score", 0.0),
+                "previous_round_issues": state.get("previous_round_issues", []),
             },
         )
 
@@ -324,6 +327,7 @@ async def run_session_loop(session_id: str) -> None:
             "fix_attempts": state.get("fix_attempts", []),
             "similar_patches": state.get("similar_patches", []),
             "quality_score": state.get("quality_score", 0.0),
+            "previous_round_issues": state.get("previous_round_issues", []),
             "summary": f"Completed with verdict {final_verdict}",
             "justification": "See conversation log for per-fix details.",
             "rounds": state.get("current_round", 0),

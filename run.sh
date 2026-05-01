@@ -8,6 +8,9 @@
 
 set -e
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "${SCRIPT_DIR}"
+
 IMAGE_NAME="patchwise"
 COMPOSE_FILE="docker-compose.yml"
 ENV_FILE=".env"
@@ -222,23 +225,40 @@ resolve_port() {
     echo $actual_port
 }
 
-# ── Commands ─────────────────────────────────────────────────
+# ── Persistent data directories ──────────────────────────────
+ensure_persistent_dirs() {
+    local dirs=(./data ./data/db ./data/chromadb ./data/patches ./data/logs ./data/backups ./data/profiles)
+    mkdir -p "${dirs[@]}" 2>/dev/null || true
+    chmod -R 755 ./data 2>/dev/null || true
 
+    for dir in "${dirs[@]}"; do
+        if [ ! -d "$dir" ] || [ ! -w "$dir" ]; then
+            echo "❌ Persistent directory is not writable: $dir"
+            echo "   Fix ownership and retry:"
+            echo "   sudo chown -R $(id -u):$(id -g) ./data"
+            return 1
+        fi
+    done
+    echo "✅ Persistent data directories ready at ./data/"
+}
+
+# ── Commands ─────────────────────────────────────────────────
 cmd_start() {
     print_banner
     setup_env
     prompt_for_missing_llm_key
     check_qgenie_and_patchwise
+    ensure_persistent_dirs
 
-    echo ">> Checking Docker image..."
-    if [[ "$(docker images -q $IMAGE_NAME 2>/dev/null)" == "" ]]; then
+    echo ">> Checking Docker image (${IMAGE_NAME}:latest)..."
+    if ! docker image inspect "${IMAGE_NAME}:latest" >/dev/null 2>&1; then
         echo ">> Image not found. Building now (this may take a few minutes)..."
         docker compose build
     fi
 
     local port=$(resolve_port)
     echo ">> Starting PatchWise on port $port..."
-    docker compose up -d
+    docker compose up -d --no-build
 
     echo ""
     echo "  ┌────────────────────────────────────────────────────┐"
@@ -265,25 +285,26 @@ cmd_restart() {
 }
 
 cmd_rebuild() {
+    local build_flag=""
+    if [[ "${1:-${2:-}}" == "--no-cache" ]]; then
+        build_flag="--no-cache"
+    fi
+
     setup_env
     prompt_for_missing_llm_key
     check_qgenie_and_patchwise
-    echo ">> Rebuilding PatchWise (applying .env changes)..."
+    ensure_persistent_dirs
+
+    echo ">> Rebuilding PatchWise (using Docker layer cache by default)..."
     docker compose down
-    docker compose build
-    docker compose up -d --force-recreate
+    docker compose build $build_flag
+    docker compose up -d --force-recreate --no-build
     echo ">> PatchWise rebuilt and started."
 }
 
 cmd_rebuild_clean() {
-    setup_env
-    prompt_for_missing_llm_key
-    check_qgenie_and_patchwise
     echo ">> Rebuilding PatchWise with --no-cache..."
-    docker compose down
-    docker compose build --no-cache
-    docker compose up -d --force-recreate
-    echo ">> PatchWise clean rebuild completed."
+    cmd_rebuild --no-cache
 }
 
 cmd_logs() {
@@ -313,6 +334,37 @@ cmd_clean() {
     fi
 }
 
+cmd_backup() {
+    ensure_persistent_dirs
+    echo "💾 Creating manual backup..."
+    TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+    if cp ./data/db/patchwise.db ./data/backups/patchwise_${TIMESTAMP}.db 2>/dev/null; then
+        echo "✅ Backup created: ./data/backups/patchwise_${TIMESTAMP}.db"
+    else
+        echo "⚠️ No database found yet"
+    fi
+}
+
+cmd_restore() {
+    ensure_persistent_dirs
+    echo "🔄 Available backups:"
+    ls -la ./data/backups/*.db 2>/dev/null || echo "No backups found"
+    echo ""
+    echo "Usage: ./run.sh restore <backup_filename>"
+
+    if [ -n "$2" ] && [ -f "./data/backups/$2" ]; then
+        cp "./data/backups/$2" ./data/db/patchwise.db
+        echo "✅ Restored from: $2"
+    fi
+}
+
+cmd_profile() {
+    echo "🧠 Knowledge Profile Manager"
+    echo "  ./run.sh profile export  — Export .pkb profile"
+    echo "  ./run.sh profile import  — Import .pkb profile"
+    echo "  ./run.sh profile summary — Show profile stats"
+}
+
 cmd_seed() {
     echo ">> Seeding LKML knowledge base (ALSA/ASoC audio subsystem)..."
     echo ">> This may take 10-20 minutes depending on network speed."
@@ -334,12 +386,16 @@ cmd_help() {
     echo "    start     Start PatchWise (auto-finds free port)"
     echo "    stop      Stop PatchWise"
     echo "    restart   Restart containers"
-    echo "    rebuild   Rebuild using Docker cache (fast, default)"
-    echo "    rebuild-clean Full rebuild with --no-cache (slow)"
+    echo "    rebuild   Rebuild image using cache (faster default)"
+    echo "    rebuild --no-cache   Full rebuild from scratch (slow)"
+    echo "    rebuild-clean        Full rebuild from scratch (slow)"
     echo "    logs      Stream container logs"
     echo "    status    Show container status + health check"
     echo "    seed      Pre-seed LKML knowledge base (ALSA/ASoC)"
     echo "    shell     Open shell inside container"
+    echo "    backup    Create timestamped SQLite backup in ./data/backups"
+    echo "    restore   Restore SQLite backup from ./data/backups"
+    echo "    profile   Knowledge profile helper commands"
     echo "    clean     Remove containers + volumes (⚠️ data loss!)"
     echo "    help      Show this help"
     echo ""
@@ -358,12 +414,15 @@ case $COMMAND in
     start)   cmd_start ;;
     stop)    cmd_stop ;;
     restart) cmd_restart ;;
-    rebuild) cmd_rebuild ;;
+    rebuild) cmd_rebuild "${2:-}" ;;
     rebuild-clean) cmd_rebuild_clean ;;
     logs)    cmd_logs ;;
     status)  cmd_status ;;
     seed)    cmd_seed ;;
     shell)   cmd_shell ;;
+    backup)  cmd_backup ;;
+    restore) cmd_restore "$@" ;;
+    profile) cmd_profile ;;
     clean)   cmd_clean ;;
     help|--help|-h) cmd_help ;;
     *)

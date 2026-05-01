@@ -1,10 +1,31 @@
+secrets:
+  gerrit_ssh_key:
+    file: ./secrets/gerrit_id_rsa
+  gerrit_ssh_pub:
+    file: ./secrets/gerrit_id_rsa.pub
+  github_token:
+    file: ./secrets/github_token.txt
+
 services:
   patchwise:
     build:
       context: .
       dockerfile: Dockerfile
+    image: patchwise:latest
+    container_name: patchwise_app
     ports:
       - "${APP_PORT:-7000}:${APP_PORT:-7000}"
+    secrets:
+      - gerrit_ssh_key
+      - gerrit_ssh_pub
+      - github_token
+    volumes:
+      - patchwise_db:/workspace/data/db
+      - patchwise_chromadb:/workspace/data/chromadb
+      - patchwise_patches:/workspace/data/patches
+      - patchwise_logs:/workspace/data/logs
+      - patchwise_backups:/workspace/data/backups
+      - patchwise_profiles:/workspace/data/profiles
     environment:
       - APP_PORT=${APP_PORT:-7000}
       - LLM_PROVIDER=${LLM_PROVIDER:-qgenie}
@@ -26,21 +47,64 @@ services:
       - GERRIT_PASSWORD=${GERRIT_PASSWORD:-}
       - SMTP_HOST=${SMTP_HOST:-localhost}
       - NOTIFY_EMAIL=${NOTIFY_EMAIL:-nandam@qti.qualcomm.com}
-    volumes:
-      - patchwise_chromadb:/app/data/chromadb
-      - patchwise_sqlite:/app/data/sqlite
-      - patchwise_patches:/app/data/patches
-      - patchwise_logs:/app/logs
-    restart: unless-stopped
+      - GERRIT_HOST=${GERRIT_HOST:-}
+      - GERRIT_USER=${GERRIT_USER:-}
+      - GITHUB_USER=${GITHUB_USER:-}
+      - GITHUB_REPO=${GITHUB_REPO:-}
+      - GERRIT_SSH_KEY_PATH=/run/secrets/gerrit_ssh_key
+      - GITHUB_TOKEN_PATH=/run/secrets/github_token
+      - AUDIO_SUBSYSTEM_FOCUS=true
+      - LKML_MAILING_LISTS=${LKML_MAILING_LISTS:-alsa-devel,linux-sound}
+      - SQLITE_PATH=/workspace/data/db/patchwise.db
+      - SQLITE_DB_PATH=/workspace/data/db/patchwise.db
+      - CHROMADB_PATH=/workspace/data/chromadb
+      - PATCHES_PATH=/workspace/data/patches
+      - PROFILES_PATH=/workspace/data/profiles
+      - BACKUPS_PATH=/workspace/data/backups
+    env_file:
+      - .env
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:${APP_PORT:-7000}/api/health"]
       interval: 30s
       timeout: 10s
       retries: 3
       start_period: 40s
+    restart: unless-stopped
 
 volumes:
+  patchwise_db:
+    driver: local
+    driver_opts:
+      type: none
+      device: ./data/db
+      o: bind
   patchwise_chromadb:
-  patchwise_sqlite:
+    driver: local
+    driver_opts:
+      type: none
+      device: ./data/chromadb
+      o: bind
   patchwise_patches:
+    driver: local
+    driver_opts:
+      type: none
+      device: ./data/patches
+      o: bind
   patchwise_logs:
+    driver: local
+    driver_opts:
+      type: none
+      device: ./data/logs
+      o: bind
+  patchwise_backups:
+    driver: local
+    driver_opts:
+      type: none
+      device: ./data/backups
+      o: bind
+  patchwise_profiles:
+    driver: local
+    driver_opts:
+      type: none
+      device: ./data/profiles
+      o: bind

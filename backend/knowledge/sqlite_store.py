@@ -1,13 +1,21 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 from pathlib import Path
 from typing import Optional
 
 
 class SQLiteStore:
-    def __init__(self, db_path: str = "./data/sqlite/patchwise.db") -> None:
+    def __init__(
+        self,
+        db_path: str = (
+            os.getenv("SQLITE_PATH")
+            or os.getenv("SQLITE_DB_PATH")
+            or "./data/sqlite/patchwise.db"
+        ),
+    ) -> None:
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._init_schema()
@@ -15,6 +23,9 @@ class SQLiteStore:
     def _get_conn(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.db_path)
         conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA busy_timeout=5000")
+        conn.execute("PRAGMA foreign_keys=ON")
         return conn
 
     def _init_schema(self) -> None:
