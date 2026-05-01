@@ -1,59 +1,83 @@
 import axios from "axios";
+import { useCallback, useMemo } from "react";
 import useSessionStore from "../store/sessionStore";
 
 const api = axios.create({ baseURL: "/api" });
 
 export default function useSession() {
-  const store = useSessionStore();
+  const kernelVersion = useSessionStore((state) => state.kernelVersion);
+  const subsystem = useSessionStore((state) => state.subsystem);
+  const sourcePath = useSessionStore((state) => state.sourcePath);
+  const llmModel = useSessionStore((state) => state.llmModel);
+  const maxRounds = useSessionStore((state) => state.maxRounds);
+  const setField = useSessionStore((state) => state.setField);
+  const setReport = useSessionStore((state) => state.setReport);
 
-  const startSession = async () => {
+  const startSession = useCallback(async () => {
     const payload = {
-      kernel_version: store.kernelVersion,
-      subsystem: store.subsystem,
-      source_path: store.sourcePath,
-      llm_model: store.llmModel,
-      max_rounds: store.maxRounds,
+      kernel_version: kernelVersion,
+      subsystem,
+      source_path: sourcePath,
+      llm_model: llmModel,
+      max_rounds: maxRounds,
     };
 
     const response = await api.post("/session/start", payload);
-    store.setField("sessionId", response.data.session_id);
+    setField("sessionId", response.data.session_id);
     return response.data;
-  };
+  }, [kernelVersion, subsystem, sourcePath, llmModel, maxRounds, setField]);
 
-  const submitPatch = async (sessionId, patchInput) => {
+  const submitPatch = useCallback(async (sessionId, patchInput) => {
     const response = await api.post("/patch/submit", {
       session_id: sessionId,
       patch_input: patchInput,
     });
-    store.setField("patchId", response.data.patch_id);
-    store.setField("originalPatch", patchInput);
-    store.setField("currentPatch", patchInput);
+    setField("patchId", response.data.patch_id);
+    setField("originalPatch", patchInput);
+    setField("currentPatch", patchInput);
     return response.data;
-  };
+  }, [setField]);
 
-  const fetchReport = async (sessionId) => {
-    const response = await api.get(`/output/${sessionId}/report`);
-    store.setReport(response.data);
-    return response.data;
-  };
+  const fetchReport = useCallback(async (sessionId) => {
+    try {
+      const response = await api.get(`/output/${sessionId}/report`);
+      setReport(response.data);
+      return response.data;
+    } catch (error) {
+      if (axios.isAxiosError(error) && error.response?.status === 404) {
+        setReport(null);
+        setField("sessionId", "");
+      }
+      throw error;
+    }
+  }, [setReport, setField]);
 
-  const fetchPatchOutput = async (sessionId) => {
-    const response = await api.get(`/output/${sessionId}/patch`);
-    store.setField("currentPatch", response.data.current_patch || "");
-    store.setField("verdict", response.data.verdict || "PENDING");
-    return response.data;
-  };
+  const fetchPatchOutput = useCallback(async (sessionId) => {
+    try {
+      const response = await api.get(`/output/${sessionId}/patch`);
+      setField("currentPatch", response.data.current_patch || "");
+      setField("verdict", response.data.verdict || "PENDING");
+      return response.data;
+    } catch (error) {
+      if (axios.isAxiosError(error) && error.response?.status === 404) {
+        setField("currentPatch", "");
+        setField("verdict", "PENDING");
+        setField("sessionId", "");
+      }
+      throw error;
+    }
+  }, [setField]);
 
-  const fetchLog = async (sessionId) => {
+  const fetchLog = useCallback(async (sessionId) => {
     const response = await api.get(`/output/${sessionId}/log`);
     return response.data;
-  };
+  }, []);
 
-  return {
+  return useMemo(() => ({
     startSession,
     submitPatch,
     fetchReport,
     fetchPatchOutput,
     fetchLog,
-  };
+  }), [startSession, submitPatch, fetchReport, fetchPatchOutput, fetchLog]);
 }

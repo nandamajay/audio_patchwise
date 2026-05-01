@@ -20,5 +20,7 @@ class PatchWiseState(TypedDict):
     interrupt_hint: str | None
     conversation_log: list[dict]
     quality_score: float
+    latest_review: dict
+    fix_history: list[dict]
     # LangGraph-native message accumulator for optional future prompt chaining.
     messages: Annotated[list[dict], add_messages]

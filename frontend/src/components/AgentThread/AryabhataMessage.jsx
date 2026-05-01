@@ -24,6 +24,8 @@ export default function AryabhataMessage({ message }) {
             language="c"
             theme="vs-dark"
             height="200px"
+            keepCurrentOriginalModel
+            keepCurrentModifiedModel
             options={{ readOnly: true, renderSideBySide: true }}
           />
         </div>

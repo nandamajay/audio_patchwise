@@ -1,20 +1,9 @@
-import { DiffEditor } from "@monaco-editor/react";
+import { MonacoDiffFull } from "../MonacoDiffInline";
 
 export default function DiffViewer({ original, modified }) {
   return (
-    <div className="glass card" style={{ minHeight: 420 }}>
-      <DiffEditor
-        height="400px"
-        language="diff"
-        original={original || ""}
-        modified={modified || ""}
-        options={{
-          renderSideBySide: true,
-          readOnly: true,
-          minimap: { enabled: false },
-          fontSize: 13,
-        }}
-      />
+    <div className="glass card" style={{ minHeight: 520 }}>
+      <MonacoDiffFull original={original || ""} modified={modified || ""} />
     </div>
   );
 }
