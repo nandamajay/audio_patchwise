@@ -11,6 +11,7 @@ from api.ws_manager import websocket_manager
 from app.agents.aryabhata import aryabhata_fix_node
 from app.agents.chanakya import chanakya_review_node
 from graph.interrupt_handler import interrupt_handler
+from graph.patchwise_graph import on_state_change
 from services.history_manager import history_manager
 from session.session_manager import SessionStatus
 
@@ -202,11 +203,13 @@ async def run_session_loop(session_id: str) -> None:
 
     while state["current_round"] <= state["max_rounds"]:
         round_number = state["current_round"]
+        await on_state_change(state, "round_started")
         before_patch = state.get("current_patch", "")
         before_refs = len(state.get("similar_patches", []))
         started_at = time.monotonic()
 
         state = await chanakya_node(state, {})
+        await on_state_change(state, "chanakya_review_complete")
         latest_review = state.get("review_findings", [])[-1] if state.get("review_findings") else {}
         issues = _round_issues(latest_review)
 
@@ -222,6 +225,8 @@ async def run_session_loop(session_id: str) -> None:
         )
 
         if state.get("verdict") in {"LGTM", "ABORT"}:
+            if state.get("verdict") == "LGTM":
+                await on_state_change(state, "lgtm")
             round_id = history_manager.save_round(
                 session_id=session_id,
                 round_number=round_number,
@@ -244,6 +249,7 @@ async def run_session_loop(session_id: str) -> None:
 
         aryabhata_input = {"issues": issues, "round": round_number}
         state = await aryabhata_node(state, {})
+        await on_state_change(state, "aryabhata_fix_complete")
 
         latest_fix = state.get("fix_attempts", [])[-1] if state.get("fix_attempts") else {}
         fixed_count = len(latest_fix.get("fixes", [])) if isinstance(latest_fix, dict) else 0
@@ -312,6 +318,7 @@ async def run_session_loop(session_id: str) -> None:
         final_verdict = "USER_ABORTED"
     elif state.get("current_round", 0) > state.get("max_rounds", 0):
         final_verdict = "MAX_ROUNDS_REACHED"
+        await on_state_change(state, "max_rounds_reached")
         status = SessionStatus.COMPLETED
     else:
         status = SessionStatus.FAILED

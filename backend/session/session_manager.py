@@ -4,9 +4,10 @@ import uuid
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from enum import Enum
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 
 from knowledge.sqlite_store import SQLiteStore
+from app.runtime import connection_manager
 
 
 class SessionStatus(str, Enum):
@@ -38,8 +39,11 @@ class SessionSnapshot:
 
 
 class SessionManager:
+    _emitted_events: Dict[str, set] = {}
+
     def __init__(self, db: SQLiteStore):
         self.db = db
+        self.sio = None
 
     def _now(self) -> str:
         return datetime.now(timezone.utc).isoformat()
@@ -99,4 +103,48 @@ class SessionManager:
         return None
 
     def delete_session(self, session_id: str) -> None:
+        self.cleanup_session(session_id)
         self.db.delete_session(session_id)
+
+    async def _persist_session_event(self, session_id: str, event_type: str, data: dict) -> None:
+        session = self.get_session(session_id)
+        if not session:
+            return
+        event = {
+            "event_type": event_type,
+            "data": data,
+            "timestamp": self._now(),
+        }
+        history = list(session.context.get("events", []))
+        history.append(event)
+        self.update_session(session_id, context={**session.context, "events": history[-200:]})
+
+    async def broadcast_session_update(self, session_id, event_type, data):
+        # Dedup: only emit each round event once
+        if event_type in ("round_complete", "max_rounds_reached", "lgtm"):
+            if session_id not in self._emitted_events:
+                self._emitted_events[session_id] = set()
+            key = f'{event_type}_{data.get("round",0)}'
+            if key in self._emitted_events[session_id]:
+                return
+            self._emitted_events[session_id].add(key)
+
+        if self.sio is not None:
+            await self.sio.emit(event_type, data, room=session_id)
+        else:
+            await connection_manager.broadcast(
+                session_id,
+                {
+                    "agent": "system",
+                    "type": event_type,
+                    "round": data.get("round", 0),
+                    "content": data.get("message", ""),
+                    "metadata": data,
+                },
+            )
+
+        if event_type in ("round_complete", "lgtm", "max_rounds_reached", "session_started"):
+            await self._persist_session_event(session_id, event_type, data)
+
+    def cleanup_session(self, session_id):
+        self._emitted_events.pop(session_id, None)

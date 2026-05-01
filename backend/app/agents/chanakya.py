@@ -5,13 +5,14 @@ from typing import Any, Optional
 
 from agents.chanakya_agent import CHANAKYA_ISSUE_FORMAT_PROMPT
 from agents.impact_analyzer import impact_analyzer
+from agents.shared.negotiation_bus import check_for_deadlock
 from app.agents.state import PatchWiseState
 from app.skills.patchwise_skill import full_patch_analysis
 from app.skills.search_skill import SearchSkill
+from agents.chanakya.version_intelligence import PatchVersionIntelligence
 from core.llm_factory import get_llm
 from core.patchwise_skill import PatchWiseResult, PatchWiseSkill
 from intelligence.cover_letter_reviewer import CoverLetterReviewer
-from intelligence.patch_version_intelligence import PatchVersionIntelligence
 
 
 CHANAKYA_SYSTEM_PROMPT = """
@@ -61,7 +62,6 @@ If an issue was flagged in a previous round and still exists, set:
 and explain that ARYABHATA's previous fix did not resolve it.
 """ + "\n\n" + CHANAKYA_ISSUE_FORMAT_PROMPT
 
-pvi = PatchVersionIntelligence()
 cover_reviewer = CoverLetterReviewer()
 _PATCHWISE_SKILL: PatchWiseSkill | None = None
 _PATCHWISE_INIT_ERROR: str | None = None
@@ -427,65 +427,126 @@ def _extract_cover_letter_and_series(patch_text: str) -> tuple[Optional[str], li
 
 
 async def _run_version_pre_review(state: PatchWiseState, round_id: int) -> list[dict[str, Any]]:
-    session_id = state.get("session_id", "")
-    patch_text = state.get("current_patch") or state.get("patch_input", "")
+    session_id = state["session_id"]
+    patch_content = state.get("current_patch") or state.get("patch_input", "")
+    user_link = state.get("lore_link") or state.get("gerrit_link") or ""
 
-    _emit_tokens(state, "chanakya", "thinking", round_id, "Detecting patch version and prior review history.")
+    _emit(
+        state,
+        {
+            "agent": "chanakya",
+            "type": "thinking",
+            "round": round_id,
+            "content": (
+                "Analyzing with PatchWise (checkpatch + ai_code_review) and QGenie deep review. "
+                "Detecting patch version and prior review history..."
+            ),
+            "metadata": {},
+        },
+    )
 
-    chain = await pvi.analyze_patch_version(patch_text, session_id)
-    if not chain:
+    vi = PatchVersionIntelligence()
+    chain = await vi.get_version_chain(
+        patch_content=patch_content,
+        user_provided_link=user_link,
+        session_id=session_id,
+    )
+
+    if chain.fetch_status == "NO_HISTORY":
         _emit(
             state,
             {
                 "agent": "chanakya",
                 "type": "info",
                 "round": round_id,
-                "content": "No previous version history found. Reviewing patch standalone.",
+                "content": "v1 patch detected - no prior version history. Reviewing standalone.",
+                "metadata": {},
             },
         )
-        return []
-
-    _emit(
-        state,
-        {
-            "agent": "chanakya",
-            "type": "version_history",
-            "round": round_id,
-            "content": (
-                f"Detected v{chain.latest_version}; found {len(chain.unaddressed_comments)} "
-                "unaddressed prior comments"
-            ),
-            "metadata": {
-                "latest_version": chain.latest_version,
-                "unaddressed_count": len(chain.unaddressed_comments),
-                "addressed_count": len(chain.addressed_comments),
-                "maintainers": chain.maintainers,
+    elif chain.fetch_status == "DEGRADED":
+        if chain.found_via == "not_found":
+            _emit(
+                state,
+                {
+                    "agent": "chanakya",
+                    "type": "needs_input",
+                    "round": round_id,
+                    "content": "",
+                    "metadata": {
+                        "message": (
+                            f"This appears to be v{chain.current_version} but no previous "
+                            f"version link was found. Searched by subject - not found. "
+                            f"Please provide the lore.kernel.org link to v{chain.current_version-1} "
+                            f"for complete context. Proceeding with standalone review."
+                        ),
+                        "type": "version_link_needed",
+                        "version": chain.current_version - 1,
+                    },
+                },
+            )
+        else:
+            _emit(
+                state,
+                {
+                    "agent": "chanakya",
+                    "type": "warning",
+                    "round": round_id,
+                    "content": (
+                        f"lore.kernel.org temporarily unreachable. "
+                        f"Reviewing v{chain.current_version} standalone (reduced context)."
+                    ),
+                    "metadata": {},
+                },
+            )
+    elif chain.fetch_status == "SUCCESS":
+        _emit(
+            state,
+            {
+                "agent": "chanakya",
+                "type": "version_history",
+                "round": round_id,
+                "content": "",
+                "metadata": {
+                    "message": (
+                        f"Version history loaded: {len(chain.versions)} previous version(s)\n"
+                        f"{len(chain.reviewer_comments)} reviewer comments found\n"
+                        f"{len(chain.addressed_comments)} addressed in this version\n"
+                        f"{len(chain.unaddressed_comments)} unaddressed - require attention"
+                    ),
+                    "unaddressed": [
+                        {
+                            "author": c.author,
+                            "role": c.role,
+                            "preview": c.body[:100],
+                            "suggested_reply": c.suggested_reply,
+                            "reply_quality": c.reply_quality,
+                        }
+                        for c in chain.unaddressed_comments
+                    ],
+                },
             },
-        },
-    )
+        )
+
+    state["version_chain"] = chain
+    state["version_intelligence_complete"] = True
 
     version_issues: list[dict[str, Any]] = []
     for comment in chain.unaddressed_comments:
         version_issues.append(
             {
                 "issue_type": "COMPLIANCE",
-                "severity": "CRITICAL" if comment.reviewer_type == "MAINTAINER" else "INFO",
+                "severity": "CRITICAL" if comment.role == "MAINTAINER" else "INFO",
                 "line_number": 1,
-                "description": f"Unaddressed review feedback from {comment.reviewer_name}",
-                "suggestion": pvi.generate_suggested_reply(comment, fix_applied=False),
-                "explanation": comment.comment_text[:500],
-                "reviewer_name": comment.reviewer_name,
-                "reviewer_email": comment.reviewer_email,
-                "reviewer_type": comment.reviewer_type,
+                "description": f"Unaddressed review feedback from {comment.author}",
+                "suggestion": comment.suggested_reply,
+                "explanation": comment.body[:500],
+                "reviewer_name": comment.author,
+                "reviewer_email": comment.email,
+                "reviewer_type": comment.role,
                 "message_id": comment.message_id,
             }
         )
 
-    state["version_chain"] = {
-        "latest_version": chain.latest_version,
-        "maintainers": chain.maintainers,
-        "unaddressed_count": len(chain.unaddressed_comments),
-    }
     return version_issues
 
 
@@ -564,16 +625,39 @@ async def chanakya_review_node(state: PatchWiseState) -> PatchWiseState:
     skill, skill_error = _get_patchwise_skill()
     if skill:
         try:
-            patchwise_result = skill.review_patch_file(
+            fallback_result = await skill.run_with_fallback(
                 patch_content=patch_text,
-                kernel_path=source_context or None,
-                subsystem=state.get("subsystem", "sound/soc"),
+                kernel_version=str(state.get("kernel_version", "6.8")),
             )
-            patchwise_status = {
-                "used": True,
-                "success": bool(patchwise_result.success),
-                "error": patchwise_result.error,
-            }
+            if isinstance(fallback_result, dict) and fallback_result.get("status") == "NEEDS_SOURCE":
+                patchwise_status = {
+                    "used": True,
+                    "success": False,
+                    "error": fallback_result.get("message"),
+                    "fallback": True,
+                    "missing_files": fallback_result.get("missing_files", []),
+                }
+                _emit(
+                    state,
+                    {
+                        "agent": "chanakya",
+                        "type": "warning",
+                        "round": round_id,
+                        "content": fallback_result.get("message", "PatchWise source files missing."),
+                        "metadata": {
+                            "missing_files": fallback_result.get("missing_files", []),
+                            "patchwise_fallback": True,
+                        },
+                    },
+                )
+                patchwise_result = None
+            else:
+                patchwise_result = fallback_result
+                patchwise_status = {
+                    "used": True,
+                    "success": bool(getattr(patchwise_result, "success", False)),
+                    "error": getattr(patchwise_result, "error", None),
+                }
         except Exception as exc:
             patchwise_status = {"used": True, "success": False, "error": str(exc)}
     else:
@@ -683,7 +767,9 @@ async def chanakya_review_node(state: PatchWiseState) -> PatchWiseState:
             if int(item.get("line_number", 0) or 0) in scope_set
         ]
 
-    prev_issues = state.get("previous_round_issues", [])
+    prev_issues = state.get("previous_round_issues")
+    if not isinstance(prev_issues, list):
+        prev_issues = []
     fix_history = state.get("fix_history", [])
     prev_fix = fix_history[-1] if fix_history else None
 
@@ -707,36 +793,32 @@ async def chanakya_review_node(state: PatchWiseState) -> PatchWiseState:
         if issue["severity"] == "INFO":
             issue["severity"] = "WARNING"
 
-    deadlock_issue = next(
-        (
-            issue
-            for issue in structured_issues
-            if issue.get("is_recurring")
-            and issue.get("fix_attempted")
-            and round_id >= 3
-        ),
-        None,
-    )
-    if deadlock_issue:
-        issue_id = deadlock_issue.get("issue_id")
+    negotiation_state = state.get("negotiation_state", {}) if isinstance(state.get("negotiation_state"), dict) else {}
+    for candidate in structured_issues:
+        issue_id = candidate.get("issue_id")
+        is_deadlock = await check_for_deadlock(
+            issue_id=issue_id,
+            session_id=state.get("session_id", ""),
+            negotiation_state=negotiation_state,
+        )
+        if not is_deadlock:
+            continue
         _emit(
             state,
             {
                 "agent": "system",
                 "type": "arbitration_required",
                 "round": round_id,
-                "content": (
-                    f"Deadlock on Issue #{issue_id}; user arbitration required."
-                ),
+                "content": f"Deadlock on Issue #{issue_id}; user arbitration required.",
                 "metadata": {
                     "session_id": state.get("session_id", ""),
                     "issue_id": issue_id,
-                    "chanakya_position": deadlock_issue.get("error_message", ""),
-                    "aryabhata_position": deadlock_issue.get("suggested_fix", ""),
+                    "chanakya_position": candidate.get("error_message", ""),
+                    "aryabhata_position": candidate.get("suggested_fix", ""),
                     "evidence_summary": {
-                        "recurring_from_round": deadlock_issue.get("recurring_from_round"),
-                        "fix_failed_reason": deadlock_issue.get("fix_failed_reason"),
-                        "reference": deadlock_issue.get("reference"),
+                        "recurring_from_round": candidate.get("recurring_from_round"),
+                        "fix_failed_reason": candidate.get("fix_failed_reason"),
+                        "reference": candidate.get("reference"),
                     },
                 },
             },
@@ -744,6 +826,7 @@ async def chanakya_review_node(state: PatchWiseState) -> PatchWiseState:
         shared = state.get("shared_a2a_context")
         if isinstance(shared, dict):
             shared["user_arbitration_pending"] = True
+        break
 
     state["previous_round_issues"] = [dict(item) for item in structured_issues]
 

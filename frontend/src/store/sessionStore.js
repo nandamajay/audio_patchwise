@@ -134,10 +134,16 @@ const useSessionStore = create((set, get) => ({
 
       const roundHistory = [...state.roundHistory];
       if (["verdict", "lgtm"].includes(normalized.type)) {
-        roundHistory.push({
+        const nextEntry = {
           round: normalized.round,
           summary: normalized.type === "lgtm" ? "LGTM" : normalized.content,
-        });
+        };
+        const alreadyExists = roundHistory.some(
+          (item) => item.round === nextEntry.round && item.summary === nextEntry.summary,
+        );
+        if (!alreadyExists) {
+          roundHistory.push(nextEntry);
+        }
       }
 
       return {

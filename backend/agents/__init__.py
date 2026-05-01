@@ -18,9 +18,9 @@ def __getattr__(name: str) -> Any:
     if name == "ARYABHATA_SYSTEM_PROMPT":
         return importlib.import_module("agents.aryabhata_agent").ARYABHATA_SYSTEM_PROMPT
     if name == "AryabhataAgent":
-        return importlib.import_module("agents.aryabhata").AryabhataAgent
+        return importlib.import_module("agents.aryabhata_agent").AryabhataAgent
     if name == "ChanakyaAgent":
-        return importlib.import_module("agents.chanakya").ChanakyaAgent
+        return importlib.import_module("agents.chanakya_agent").ChanakyaAgent
     if name in {"CHANAKYA_SYSTEM_PROMPT", "CHANAKYA_ISSUE_FORMAT_PROMPT"}:
         module = importlib.import_module("agents.chanakya_agent")
         return getattr(module, name)
