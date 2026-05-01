@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+import os
+
 from fastapi import APIRouter
 
+from app.config import settings
+from knowledge_base.lkml_targeter import LKMLTargeter
 from submission.dry_run import CheckStatus, DryRunManager
 
 router = APIRouter(prefix="/api", tags=["advanced"])
@@ -56,5 +60,34 @@ async def execute_submission(payload: dict):
     result = await dry_run.execute_command(
         command=payload.get("command", ""),
         cwd=payload.get("cwd", "."),
+    )
+    return result
+
+
+@router.post("/lkml/auto-detect")
+async def auto_detect_targets(payload: dict):
+    """Auto-detect mailing lists and maintainers from patch content."""
+    kernel_path = os.getenv("KERNEL_PATH", getattr(settings, "KERNEL_PATH", "/workspace/linux"))
+    targeter = LKMLTargeter(kernel_path=kernel_path)
+    result = await targeter.auto_detect_from_patch(payload.get("patch_content", ""))
+    return result
+
+
+@router.get("/lkml/all-targets")
+async def get_all_targets():
+    """Return known mailing lists and maintainers for manual selection."""
+    targeter = LKMLTargeter()
+    return targeter.get_all_targets()
+
+
+@router.post("/lkml/seed-targeted")
+async def seed_targeted(payload: dict):
+    """Trigger targeted LKML pre-seeding for selected mailing lists."""
+    from knowledge_base.lkml_seeder import LKMLSeeder
+
+    seeder = LKMLSeeder()
+    result = await seeder.seed_specific_lists(
+        list_ids=payload.get("list_ids", ["alsa-devel"]),
+        months_back=payload.get("months_back", 24),
     )
     return result
