@@ -123,25 +123,27 @@ http://localhost:3000
 
 ### .env Reference
 ```env
-# LLM Provider (openai / anthropic / qualcomm)
+# LLM runtime
+# Use openai/anthropic for highest-accuracy agent reasoning.
+# Use mock for offline/local deterministic mode.
 LLM_PROVIDER=openai
-OPENAI_API_KEY=your_key_here
-ANTHROPIC_API_KEY=your_key_here
-QUALCOMM_API_KEY=your_key_here
+LLM_MODEL=gpt-4o
+LLM_API_KEY=
+OPENAI_API_KEY=your_openai_key
+ANTHROPIC_API_KEY=your_anthropic_key
+QUALCOMM_API_KEY=
 
-# Server Ports (auto-increments if occupied)
-BACKEND_PORT=8000
-FRONTEND_PORT=3000
+# Unified app port (run.sh auto-increments if busy)
+APP_PORT=7000
 
 # Agent Settings
-MAX_REVIEW_ROUNDS=5
-DEFAULT_SUBSYSTEM=audio
-STREAMING_ENABLED=true
+CHANAKYA_MAX_ROUNDS=5
+SUBSYSTEM=audio
 
 # Knowledge Base
-CHROMADB_PATH=/workspace/data/chromadb
-SQLITE_PATH=/workspace/data/patchwise.db
-LKML_SEED_YEARS=2
+CHROMADB_PATH=/app/data/chromadb
+SQLITE_PATH=/app/data/sqlite/patchwise.db
+LKML_PRESEEDED=false
 
 # Submission
 GITHUB_TOKEN=your_token_here

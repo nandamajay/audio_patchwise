@@ -5,7 +5,8 @@ class SessionStartRequest(BaseModel):
     kernel_version: str = Field(default="unknown")
     subsystem: str = Field(default="alsa-asoc")
     source_path: str = Field(default="")
-    llm_model: str = Field(default="gpt-4o")
+    llm_provider: str = Field(default="mock")
+    llm_model: str = Field(default="local")
     max_rounds: int = Field(default=5, ge=1, le=5)
 
 
@@ -15,5 +16,6 @@ class SessionResponse(BaseModel):
     kernel_version: str
     subsystem: str
     source_path: str
+    llm_provider: str
     llm_model: str
     max_rounds: int

@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from agents.chanakya_agent import CHANAKYA_ISSUE_FORMAT_PROMPT
+from app.agents.llm_bridge import build_runtime_from_state, invoke_json
 from app.agents.state import PatchWiseState
 from app.skills.patchwise_skill import full_patch_analysis
 from app.skills.search_skill import SearchSkill
@@ -140,6 +141,78 @@ def _default_fix(problematic: str, issue: dict[str, Any]) -> str:
     return problematic
 
 
+def _enrich_issues_with_remote_llm(
+    state: PatchWiseState,
+    structured_issues: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], str]:
+    runtime = build_runtime_from_state(state)
+    analysis_mode = (
+        f"{runtime.provider}:{runtime.model}" if runtime.enabled else f"local ({runtime.reason})"
+    )
+    if not runtime.enabled or not structured_issues:
+        return structured_issues, analysis_mode
+
+    payload = [
+        {
+            "issue_id": issue["issue_id"],
+            "category": issue["category"],
+            "severity": issue["severity"],
+            "line_number": issue["line_number"],
+            "file_path": issue["file_path"],
+            "error_message": issue["error_message"],
+            "problematic_code": issue["problematic_code"],
+            "suggested_fix": issue["suggested_fix"],
+            "hunk_context": issue["hunk_context"],
+        }
+        for issue in structured_issues
+    ]
+
+    prompt = f"""
+You are CHANAKYA, Linux kernel reviewer. Improve issue quality for upstreaming.
+
+Return ONLY JSON array. For each issue keep same issue_id and provide:
+- issue_id
+- severity (CRITICAL|WARNING|INFO)
+- error_message (specific, actionable)
+- suggested_fix (exact corrected line or trailer)
+- explanation (brief upstream rationale)
+
+Rules:
+- Do not invent new issues.
+- Keep STYLE findings only when checkpatch-style actionable.
+- Prioritize logic, memory, commit message, and compliance correctness.
+- Keep suggested_fix minimal and line-specific.
+
+ISSUES:
+{payload}
+"""
+
+    response = invoke_json(runtime, prompt)
+    if not isinstance(response, list):
+        return structured_issues, analysis_mode
+
+    by_id = {
+        item.get("issue_id"): item
+        for item in response
+        if isinstance(item, dict) and isinstance(item.get("issue_id"), str)
+    }
+    for issue in structured_issues:
+        update = by_id.get(issue["issue_id"])
+        if not update:
+            continue
+        severity = update.get("severity")
+        if severity in {"CRITICAL", "WARNING", "INFO"}:
+            issue["severity"] = severity
+        if isinstance(update.get("error_message"), str) and update["error_message"].strip():
+            issue["error_message"] = update["error_message"].strip()
+        if isinstance(update.get("suggested_fix"), str) and update["suggested_fix"].strip():
+            issue["suggested_fix"] = update["suggested_fix"].strip()
+        if isinstance(update.get("explanation"), str) and update["explanation"].strip():
+            issue["explanation"] = update["explanation"].strip()
+
+    return structured_issues, analysis_mode
+
+
 def chanakya_review_node(state: PatchWiseState) -> PatchWiseState:
     round_id = state.get("current_round", 1)
     patch_text = state.get("current_patch") or state.get("patch_input", "")
@@ -211,24 +284,28 @@ def chanakya_review_node(state: PatchWiseState) -> PatchWiseState:
             issue["similar_patch_refs"] = similar_refs[:2]
             structured_issues.append(issue)
 
-            _emit(
-                state,
-                {
-                    "agent": "chanakya",
-                    "type": "finding",
-                    "round": round_id,
-                    "content": issue["error_message"],
-                    "metadata": {
-                        "issue_type": issue["category"],
-                        "severity": issue["severity"],
-                        "line_number": issue["line_number"],
-                        "issue_id": issue["issue_id"],
-                        "recurring": issue["is_recurring"],
-                        "first_seen": issue["previous_round"],
-                        "issue": issue,
-                    },
+    structured_issues, analysis_mode = _enrich_issues_with_remote_llm(state, structured_issues)
+
+    for issue in structured_issues:
+        _emit(
+            state,
+            {
+                "agent": "chanakya",
+                "type": "finding",
+                "round": round_id,
+                "content": issue["error_message"],
+                "metadata": {
+                    "issue_type": issue["category"],
+                    "severity": issue["severity"],
+                    "line_number": issue["line_number"],
+                    "issue_id": issue["issue_id"],
+                    "recurring": issue["is_recurring"],
+                    "first_seen": issue["previous_round"],
+                    "analysis_mode": analysis_mode,
+                    "issue": issue,
                 },
-            )
+            },
+        )
 
     for ref in similar_refs[:3]:
         _emit(
@@ -252,6 +329,7 @@ def chanakya_review_node(state: PatchWiseState) -> PatchWiseState:
         "findings": structured_issues,
         "summary": f"Found {issue_count} issue(s).",
         "quality_score": quality_score,
+        "analysis_mode": analysis_mode,
     }
     state["latest_review"] = round_payload
     state.setdefault("review_findings", []).append(round_payload)
@@ -275,7 +353,11 @@ def chanakya_review_node(state: PatchWiseState) -> PatchWiseState:
             "type": final_type,
             "round": round_id,
             "content": "LGTM" if verdict == "LGTM" else "Needs work",
-            "metadata": {"quality_score": quality_score, "issue_count": issue_count},
+            "metadata": {
+                "quality_score": quality_score,
+                "issue_count": issue_count,
+                "analysis_mode": analysis_mode,
+            },
         },
     )
 

@@ -44,7 +44,9 @@ setup_env() {
     if [ ! -f "$ENV_FILE" ]; then
         echo ">> .env not found. Creating from .env.example..."
         cp "$ENV_EXAMPLE" "$ENV_FILE"
-        echo ">> Please review .env and update API keys if needed."
+        echo ">> Please review .env."
+        echo ">> For highest-accuracy agent mode set LLM_PROVIDER=openai or anthropic and add API key."
+        echo ">> For offline mode set LLM_PROVIDER=mock."
         echo ">> Then run: ./run.sh start"
         exit 0
     fi

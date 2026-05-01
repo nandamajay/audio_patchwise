@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter, HTTPException
 
+from app.agents.llm_bridge import parse_provider_model
 from app.models.session import SessionResponse, SessionStartRequest
 from app.runtime import SESSION_STORE
 
@@ -15,6 +16,8 @@ router = APIRouter(prefix="/session", tags=["session"])
 
 @router.post("/start", response_model=SessionResponse)
 def start_session(payload: SessionStartRequest) -> SessionResponse:
+    llm_provider, llm_model = parse_provider_model(payload.llm_provider, payload.llm_model)
+
     if session_manager:
         session_id = session_manager.create_session(
             patch_input={"raw_text": "", "file_path": "", "gerrit_url": "", "lkml_url": ""},
@@ -25,7 +28,8 @@ def start_session(payload: SessionStartRequest) -> SessionResponse:
             },
             config={
                 "max_rounds": payload.max_rounds,
-                "llm_provider": payload.llm_model,
+                "llm_provider": llm_provider,
+                "llm_model": llm_model,
                 "review_focus": ["style", "logic", "memory", "lkml", "commit"],
                 "search_priority": ["lkml", "gerrit", "local"],
             },
@@ -41,7 +45,8 @@ def start_session(payload: SessionStartRequest) -> SessionResponse:
         "kernel_version": payload.kernel_version,
         "subsystem": payload.subsystem,
         "source_path": payload.source_path,
-        "llm_model": payload.llm_model,
+        "llm_provider": llm_provider,
+        "llm_model": llm_model,
         "max_rounds": payload.max_rounds,
         "current_round": 1,
         "review_findings": [],
@@ -60,7 +65,8 @@ def start_session(payload: SessionStartRequest) -> SessionResponse:
         kernel_version=payload.kernel_version,
         subsystem=payload.subsystem,
         source_path=payload.source_path,
-        llm_model=payload.llm_model,
+        llm_provider=llm_provider,
+        llm_model=llm_model,
         max_rounds=payload.max_rounds,
     )
 

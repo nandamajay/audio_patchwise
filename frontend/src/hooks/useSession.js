@@ -14,11 +14,18 @@ export default function useSession() {
   const setReport = useSessionStore((state) => state.setReport);
 
   const startSession = useCallback(async () => {
+    const [llmProviderRaw, llmModelRaw] = String(llmModel || "").includes(":")
+      ? String(llmModel).split(":", 2)
+      : ["openai", String(llmModel || "gpt-4o")];
+    const llmProvider = llmProviderRaw || "openai";
+    const resolvedModel = llmModelRaw || "gpt-4o";
+
     const payload = {
       kernel_version: kernelVersion,
       subsystem,
       source_path: sourcePath,
-      llm_model: llmModel,
+      llm_provider: llmProvider,
+      llm_model: resolvedModel,
       max_rounds: maxRounds,
     };
 

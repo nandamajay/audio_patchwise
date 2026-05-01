@@ -2,6 +2,17 @@ import axios from "axios";
 import { create } from "zustand";
 
 const api = axios.create({ baseURL: "/api" });
+const PROVIDERS = new Set(["openai", "anthropic", "mock", "qualcomm"]);
+
+function toSelection(config) {
+  const providerRaw = String(config?.llm_provider || "").toLowerCase();
+  const modelRaw = String(config?.llm_model || "").trim();
+
+  if (providerRaw.includes(":")) return providerRaw;
+  if (PROVIDERS.has(providerRaw)) return `${providerRaw}:${modelRaw || "local"}`;
+  if (providerRaw) return `openai:${providerRaw}`;
+  return "openai:gpt-4o";
+}
 
 const useSessionStore = create((set, get) => ({
   sessionId: "",
@@ -13,7 +24,7 @@ const useSessionStore = create((set, get) => ({
   kernelVersion: "6.9",
   subsystem: "alsa-asoc",
   sourcePath: "sound/soc/",
-  llmModel: "gpt-4o",
+  llmModel: "openai:gpt-4o",
   maxRounds: 5,
   currentRound: 1,
   qualityScore: 0,
@@ -139,7 +150,7 @@ const useSessionStore = create((set, get) => ({
       kernelVersion: snapshot.context?.kernel_version || "",
       subsystem: snapshot.context?.subsystem || "alsa-asoc",
       sourcePath: snapshot.context?.source_path || "",
-      llmModel: snapshot.config?.llm_provider || "gpt-4o",
+      llmModel: toSelection(snapshot.config),
       maxRounds: snapshot.max_rounds || 5,
       currentRound: snapshot.current_round || 1,
       messages: (snapshot.conversation || []).map((message, index) => ({

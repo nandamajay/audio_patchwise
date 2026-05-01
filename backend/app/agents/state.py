@@ -9,6 +9,7 @@ class PatchWiseState(TypedDict):
     kernel_version: str
     subsystem: str
     source_path: str
+    llm_provider: str
     llm_model: str
     max_rounds: int
     current_round: int

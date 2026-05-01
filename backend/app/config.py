@@ -10,6 +10,12 @@ class Settings(BaseSettings):
     db_url: str = "sqlite:///./data/patchwise.db"
     chroma_host: str = "localhost"
     chroma_port: int = 8001
+    llm_provider: str = "mock"
+    llm_model: str = "local"
+    llm_api_key: str = ""
+    openai_api_key: str = ""
+    anthropic_api_key: str = ""
+    qualcomm_api_key: str = ""
 
     model_config = SettingsConfigDict(
         env_prefix="PATCHWISE_",

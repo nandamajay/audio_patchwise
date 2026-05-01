@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import re
 from dataclasses import asdict, dataclass
+
+from app.skills.checkpatch_skill import run_checkpatch
 
 
 @dataclass
@@ -50,28 +53,60 @@ def parse_patch(raw_text: str) -> list[PatchHunk]:
 
 
 def check_kernel_style(patch: str) -> list[dict]:
+    result = run_checkpatch(patch)
+    if result.get("status") == "skipped":
+        # Avoid noisy style heuristics when checkpatch.pl is unavailable.
+        return []
+
+    output = result.get("output", "")
+    if not output:
+        return []
+
     issues: list[BaseIssue] = []
-    for idx, line in enumerate(patch.splitlines(), 1):
-        if "\t" in line:
-            issues.append(
-                BaseIssue(
-                    issue_type="STYLE",
-                    severity="WARNING",
-                    line_number=idx,
-                    description="Tab character detected; kernel style prefers spaces for alignment.",
-                    suggestion="Replace tabs with spaces where alignment is intended.",
-                )
+    pending_msg = ""
+    pending_severity = "INFO"
+    seen: set[tuple[int, str]] = set()
+
+    for raw_line in output.splitlines():
+        line = raw_line.strip()
+        if line.startswith("ERROR:"):
+            pending_msg = line.split(":", 1)[1].strip()
+            pending_severity = "CRITICAL"
+            continue
+        if line.startswith("WARNING:"):
+            pending_msg = line.split(":", 1)[1].strip()
+            pending_severity = "WARNING"
+            continue
+        if line.startswith("CHECK:"):
+            pending_msg = line.split(":", 1)[1].strip()
+            pending_severity = "INFO"
+            continue
+
+        if not pending_msg:
+            continue
+
+        line_match = re.search(r"#(\\d+):", line) or re.search(r"FILE:[^:]+:(\\d+):", line)
+        if not line_match:
+            continue
+
+        line_number = int(line_match.group(1))
+        key = (line_number, pending_msg)
+        if key in seen:
+            pending_msg = ""
+            continue
+        seen.add(key)
+
+        issues.append(
+            BaseIssue(
+                issue_type="STYLE",
+                severity=pending_severity,
+                line_number=line_number,
+                description=pending_msg,
+                suggestion="Apply checkpatch.pl recommended fix for this line.",
             )
-        if len(line) > 100:
-            issues.append(
-                BaseIssue(
-                    issue_type="STYLE",
-                    severity="INFO",
-                    line_number=idx,
-                    description="Line exceeds 100 characters.",
-                    suggestion="Wrap the line to improve readability.",
-                )
-            )
+        )
+        pending_msg = ""
+
     return _to_dicts(issues)
 
 

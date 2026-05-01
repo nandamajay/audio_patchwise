@@ -4,6 +4,12 @@ from typing import Any
 
 from agents.aryabhata_agent import ARYABHATA_SYSTEM_PROMPT
 from agents.aryabhata_fix_engine import AryabhataFixEngine
+from app.agents.llm_bridge import (
+    LLMRuntime,
+    build_runtime_from_state,
+    invoke_text,
+    parse_line_fix_response,
+)
 from models.patch_models import LineEdit, ReviewIssue
 
 
@@ -96,6 +102,54 @@ def _validation_issue(message: str, index: int, round_id: int) -> ReviewIssue:
     )
 
 
+def _generate_targeted_fix(
+    runtime: LLMRuntime,
+    issue: ReviewIssue,
+    current_patch: str,
+) -> LineEdit | None:
+    if not runtime.enabled:
+        return None
+
+    prompt = f"""
+You are ARYABHATA, Linux kernel patch developer.
+Return ONLY three lines in this exact format:
+ORIGINAL_LINE: <exact problematic code line>
+FIXED_LINE: <exact corrected replacement line>
+JUSTIFICATION: <one-sentence upstream rationale>
+
+Issue category: {issue.category}
+Line number: {issue.line_number}
+Error: {issue.error_message}
+Suggested fix: {issue.suggested_fix}
+Problematic line: {issue.problematic_code}
+Hunk context:
+{issue.hunk_context}
+
+Current patch line at {issue.line_number}:
+{_line_at(current_patch, issue.line_number)}
+"""
+
+    response = invoke_text(runtime, prompt)
+    parsed = parse_line_fix_response(response or "")
+    if not parsed:
+        return None
+
+    original_line = parsed.original_line or issue.problematic_code or _line_at(
+        current_patch, issue.line_number
+    )
+    if not parsed.fixed_line:
+        return None
+
+    return LineEdit(
+        line_number=issue.line_number,
+        original_line=original_line,
+        fixed_line=parsed.fixed_line,
+        issue_id=issue.issue_id,
+        category=issue.category,
+        justification=parsed.justification,
+    )
+
+
 def aryabhata_fix_node(state: dict[str, Any]) -> dict[str, Any]:
     """
     ARYABHATA developer node: produce an actual modified patch file.
@@ -124,6 +178,8 @@ def aryabhata_fix_node(state: dict[str, Any]) -> dict[str, Any]:
         },
     )
 
+    runtime = build_runtime_from_state(state)
+
     fix_instructions: dict[str, LineEdit] = {}
     for issue in review_issues:
         _emit(
@@ -140,15 +196,17 @@ def aryabhata_fix_node(state: dict[str, Any]) -> dict[str, Any]:
             },
         )
 
-        fixed_line = _default_fixed_line(issue, current_patch)
-        line_edit = LineEdit(
-            line_number=issue.line_number,
-            original_line=issue.problematic_code or _line_at(current_patch, issue.line_number),
-            fixed_line=fixed_line,
-            issue_id=issue.issue_id,
-            category=issue.category,
-            justification=issue.explanation or "Applied targeted upstream-safe correction.",
-        )
+        line_edit = _generate_targeted_fix(runtime, issue, current_patch)
+        if line_edit is None:
+            fixed_line = _default_fixed_line(issue, current_patch)
+            line_edit = LineEdit(
+                line_number=issue.line_number,
+                original_line=issue.problematic_code or _line_at(current_patch, issue.line_number),
+                fixed_line=fixed_line,
+                issue_id=issue.issue_id,
+                category=issue.category,
+                justification=issue.explanation or "Applied targeted upstream-safe correction.",
+            )
         fix_instructions[issue.issue_id] = line_edit
 
         _emit(
@@ -220,7 +278,10 @@ def aryabhata_fix_node(state: dict[str, Any]) -> dict[str, Any]:
             "fixed_patch": fix_result.fixed_patch,
             "checkpatch_output": fix_result.validation_result.get("checkpatch_output", ""),
             "validation_passed": bool(fix_result.validation_result.get("passed", False)),
-            "justification": "All flagged issues were applied to concrete patch lines.",
+            "justification": (
+                "All flagged issues were applied to concrete patch lines. "
+                f"Fix mode: {'remote ' + runtime.provider if runtime.enabled else 'local'}."
+            ),
         },
     )
 
