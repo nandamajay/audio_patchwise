@@ -4,6 +4,20 @@ import { create } from "zustand";
 const api = axios.create({ baseURL: "/api" });
 const PROVIDERS = new Set(["qgenie", "openai", "anthropic", "mock", "qualcomm"]);
 
+function buildPatchwiseNotice(patchwise) {
+  if (!patchwise || typeof patchwise !== "object") return "";
+  if (patchwise.success) return "";
+  const rawError = String(patchwise.error || "").trim();
+  if (!rawError) return "";
+  if (rawError.includes("commit/repo mode only")) {
+    return "PatchWise CLI in this environment requires commit+repo mode. Using QGenie fallback review for this patch input.";
+  }
+  if (rawError.includes("Could not infer commit hashes")) {
+    return "PatchWise could not infer commit hashes from uploaded patch text. Using QGenie fallback review.";
+  }
+  return `PatchWise review unavailable for this input. Using QGenie fallback. Reason: ${rawError}`;
+}
+
 function toSelection(config) {
   const providerRaw = String(config?.llm_provider || "").toLowerCase();
   const provider = providerRaw === "qualcomm" ? "qgenie" : providerRaw;
@@ -38,6 +52,8 @@ const useSessionStore = create((set, get) => ({
   report: null,
   sessions: [],
   loadingSessions: false,
+  patchwiseStatus: null,
+  patchwiseNotice: "",
 
   setField: (field, value) =>
     set((state) => {
@@ -111,6 +127,10 @@ const useSessionStore = create((set, get) => ({
         normalized.type === "lgtm"
           ? "LGTM"
           : normalized.metadata?.verdict || state.verdict;
+      const patchwiseStatus = normalized.metadata?.patchwise ?? state.patchwiseStatus;
+      const patchwiseNotice = normalized.metadata?.patchwise
+        ? buildPatchwiseNotice(normalized.metadata.patchwise)
+        : state.patchwiseNotice;
 
       const roundHistory = [...state.roundHistory];
       if (["verdict", "lgtm"].includes(normalized.type)) {
@@ -125,6 +145,8 @@ const useSessionStore = create((set, get) => ({
         issueBreakdown,
         qualityScore,
         verdict,
+        patchwiseStatus,
+        patchwiseNotice,
         currentRound: normalized.round || state.currentRound,
         roundHistory,
       };
@@ -149,6 +171,10 @@ const useSessionStore = create((set, get) => ({
     const response = await api.get(`/sessions/${sessionId}`);
     const snapshot = response.data;
 
+    const reviewFindings = snapshot.review_report?.review_findings || [];
+    const latestReview = reviewFindings.length ? reviewFindings[reviewFindings.length - 1] : null;
+    const patchwiseStatus = latestReview?.patchwise || null;
+
     set(() => ({
       currentSessionId: snapshot.session_id,
       sessionId: snapshot.session_id,
@@ -167,6 +193,8 @@ const useSessionStore = create((set, get) => ({
       })),
       verdict: snapshot.verdict || "PENDING",
       report: snapshot.review_report || null,
+      patchwiseStatus,
+      patchwiseNotice: buildPatchwiseNotice(patchwiseStatus),
     }));
   },
 
@@ -194,6 +222,8 @@ const useSessionStore = create((set, get) => ({
       roundHistory: [],
       messages: [],
       report: null,
+      patchwiseStatus: null,
+      patchwiseNotice: "",
     })),
 }));
 

@@ -255,6 +255,15 @@ button {
   box-shadow: var(--shadow-green);
 }
 
+.patchwise-banner {
+  margin: 12px 0;
+  padding: 12px;
+  border-radius: 12px;
+  color: #ffe8bd;
+  border: 1px solid rgba(255, 179, 71, 0.45);
+  background: rgba(255, 179, 71, 0.12);
+}
+
 .small {
   font-size: 12px;
   color: var(--text-muted);

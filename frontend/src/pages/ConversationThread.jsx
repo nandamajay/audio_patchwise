@@ -19,6 +19,7 @@ export default function ConversationThread() {
     messages,
     qualityScore,
     verdict,
+    patchwiseNotice,
     issueBreakdown,
     roundHistory,
     fetchSessions,
@@ -45,6 +46,12 @@ export default function ConversationThread() {
         <div className="round-divider">
           ROUND {currentRound} — Patch Quality: {qualityScore.toFixed(0)}%
         </div>
+
+        {patchwiseNotice ? (
+          <div className="patchwise-banner">
+            ⚠️ {patchwiseNotice}
+          </div>
+        ) : null}
 
         <ThreadView messages={messages} />
 
