@@ -1,7 +1,18 @@
-from langgraph.graph import StateGraph, END
-from .state import PatchWiseState
-from .chanakya import chanakya_review_node
+import asyncio
+
+from langgraph.graph import END, StateGraph
+
 from .aryabhata import aryabhata_fix_node
+from .chanakya import chanakya_review_node
+from .state import PatchWiseState
+
+
+def _chanakya_review_sync(state: PatchWiseState) -> PatchWiseState:
+    """
+    LangGraph sync invoke path expects synchronous node handlers.
+    Wrap async CHANAKYA node for compatibility with invoke().
+    """
+    return asyncio.run(chanakya_review_node(state))
 
 def should_continue(state: PatchWiseState) -> str:
     if state["verdict"] == "LGTM":
@@ -12,7 +23,7 @@ def should_continue(state: PatchWiseState) -> str:
 
 def build_patchwise_graph():
     graph = StateGraph(PatchWiseState)
-    graph.add_node("chanakya_review", chanakya_review_node)
+    graph.add_node("chanakya_review", _chanakya_review_sync)
     graph.add_node("aryabhata_fix", aryabhata_fix_node)
     graph.set_entry_point("chanakya_review")
     graph.add_conditional_edges(

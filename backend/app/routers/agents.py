@@ -5,7 +5,8 @@ import traceback
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
-from app.agents.graph import patchwise_graph
+from app.agents.aryabhata import aryabhata_fix_node
+from app.agents.chanakya import chanakya_review_node
 from app.knowledge.sql_store import PatchSQLStore
 from app.knowledge.vector_store import PatchVectorStore
 from app.runtime import REPORT_STORE, SESSION_STORE, connection_manager
@@ -128,6 +129,25 @@ def _stream_callback_for(loop: asyncio.AbstractEventLoop, session_id: str):
     return _callback
 
 
+def _execute_review_cycle_sync(state: dict) -> dict:
+    """
+    Execute CHANAKYA -> ARYABHATA loop directly to avoid langgraph runtime
+    sync/async compatibility issues in websocket flow.
+    """
+    while True:
+        state = asyncio.run(chanakya_review_node(state))
+        state = _normalize_state(state)
+
+        if state.get("verdict") == "LGTM":
+            return state
+
+        if state.get("current_round", 1) >= state.get("max_rounds", 5):
+            return state
+
+        state = aryabhata_fix_node(state)
+        state = _normalize_state(state)
+
+
 async def run_agent_loop(session_id: str) -> None:
     state = SESSION_STORE.get(session_id)
     if not state:
@@ -150,7 +170,7 @@ async def run_agent_loop(session_id: str) -> None:
             pass
 
     try:
-        final_state = await asyncio.to_thread(patchwise_graph.invoke, state)
+        final_state = await asyncio.to_thread(_execute_review_cycle_sync, state)
     except Exception as exc:
         error_text = traceback.format_exc(limit=6)
         await connection_manager.broadcast(
