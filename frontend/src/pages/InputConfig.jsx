@@ -83,6 +83,9 @@ export default function InputConfig() {
           <h3 style={{ marginBottom: 10 }}>Configuration</h3>
           <div className="grid" style={{ gap: 10 }}>
             <LLMDropdown value={llmModel} onChange={(value) => setField("llmModel", value)} />
+            <p className="small">
+              Configure API keys securely in <a href="/settings" style={{ color: "var(--accent-blue)" }}>Settings</a>.
+            </p>
             <label className="small">Max rounds: {maxRounds}</label>
             <input
               type="range"

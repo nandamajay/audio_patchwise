@@ -53,6 +53,91 @@ setup_env() {
     source "$ENV_FILE"
 }
 
+upsert_env_value() {
+    local key="$1"
+    local value="$2"
+    local tmp_file="${ENV_FILE}.tmp"
+    awk -v key="$key" -v value="$value" '
+        BEGIN { found = 0 }
+        $0 ~ "^" key "=" {
+            print key "=" value
+            found = 1
+            next
+        }
+        { print }
+        END {
+            if (!found) {
+                print key "=" value
+            }
+        }
+    ' "$ENV_FILE" > "$tmp_file"
+    mv "$tmp_file" "$ENV_FILE"
+}
+
+provider_key_var() {
+    local provider="$1"
+    case "$provider" in
+        openai) echo "OPENAI_API_KEY" ;;
+        anthropic) echo "ANTHROPIC_API_KEY" ;;
+        qualcomm) echo "QUALCOMM_API_KEY" ;;
+        *) echo "" ;;
+    esac
+}
+
+provider_requires_key() {
+    local provider="$1"
+    case "$provider" in
+        openai|anthropic|qualcomm) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+prompt_for_missing_llm_key() {
+    local provider="${LLM_PROVIDER:-mock}"
+    provider="${provider%%:*}"
+    provider="$(echo "$provider" | tr '[:upper:]' '[:lower:]')"
+
+    if ! provider_requires_key "$provider"; then
+        return
+    fi
+
+    local key_var
+    key_var="$(provider_key_var "$provider")"
+    local provider_key="${!key_var}"
+    local generic_key="${LLM_API_KEY:-}"
+    if [ -n "$provider_key" ] || [ -n "$generic_key" ]; then
+        return
+    fi
+
+    echo ">> No API key configured for provider '$provider'."
+    echo ">> Enter a key now (input hidden). Leave empty to switch to mock mode."
+    local entered_key=""
+    read -r -s -p "   ${provider^^} API key: " entered_key
+    echo ""
+
+    if [ -z "$entered_key" ]; then
+        echo ">> No key entered. Switching to mock/local mode."
+        export LLM_PROVIDER="mock"
+        export LLM_MODEL="local"
+        echo ">> This change is only for current run."
+        return
+    fi
+
+    export "$key_var=$entered_key"
+    read -r -p ">> Save key to .env for future runs? (y/N): " save_key
+    if [[ "$save_key" =~ ^[Yy]$ ]]; then
+        upsert_env_value "$key_var" "$entered_key"
+        upsert_env_value "LLM_PROVIDER" "$provider"
+        if [ -z "${LLM_MODEL:-}" ] || [ "${LLM_MODEL}" = "local" ]; then
+            case "$provider" in
+                openai) upsert_env_value "LLM_MODEL" "gpt-4o" ;;
+                anthropic) upsert_env_value "LLM_MODEL" "claude-3-5-sonnet-latest" ;;
+                qualcomm) upsert_env_value "LLM_MODEL" "qualcomm-internal" ;;
+            esac
+        fi
+    fi
+}
+
 # ── Resolve port and update .env ─────────────────────────────
 resolve_port() {
     local requested_port=${APP_PORT:-$DEFAULT_PORT}
@@ -73,6 +158,7 @@ resolve_port() {
 cmd_start() {
     print_banner
     setup_env
+    prompt_for_missing_llm_key
 
     echo ">> Checking Docker image..."
     if [[ "$(docker images -q $IMAGE_NAME 2>/dev/null)" == "" ]]; then
@@ -109,6 +195,8 @@ cmd_restart() {
 }
 
 cmd_rebuild() {
+    setup_env
+    prompt_for_missing_llm_key
     echo ">> Rebuilding PatchWise (applying .env changes)..."
     docker compose down
     docker compose build --no-cache

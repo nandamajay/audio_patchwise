@@ -5,6 +5,8 @@ import os
 from dataclasses import dataclass
 from typing import Any
 
+from app.security.runtime_secrets import get_runtime_api_key, get_runtime_provider_model
+
 
 LEGACY_MODEL_MAP: dict[str, tuple[str, str]] = {
     "gpt-4o": ("openai", "gpt-4o"),
@@ -46,6 +48,8 @@ def parse_provider_model(
 ) -> tuple[str, str]:
     provider = (llm_provider or "").strip().lower()
     model = (llm_model or "").strip()
+    runtime_provider = ""
+    runtime_model = ""
 
     if ":" in model and not provider:
         head, tail = model.split(":", 1)
@@ -57,10 +61,13 @@ def parse_provider_model(
         model = mapped_model
 
     if not provider:
-        provider = os.getenv("LLM_PROVIDER", "mock").strip().lower()
+        runtime_provider, runtime_model = get_runtime_provider_model()
+        provider = runtime_provider
 
     if not model:
-        model = os.getenv("LLM_MODEL", "").strip()
+        model = runtime_model
+        if not model:
+            model = os.getenv("LLM_MODEL", "").strip()
 
     if provider in {"local", "none"}:
         provider = "mock"
@@ -75,6 +82,10 @@ def parse_provider_model(
 
 
 def _resolve_api_key(provider: str) -> str:
+    runtime_key = get_runtime_api_key(provider)
+    if runtime_key:
+        return runtime_key
+
     if provider == "openai":
         return (os.getenv("OPENAI_API_KEY") or os.getenv("LLM_API_KEY") or "").strip()
     if provider == "anthropic":

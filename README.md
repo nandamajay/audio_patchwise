@@ -182,6 +182,11 @@ NOTIFICATION_EMAIL=nandam@qti.qualcomm.com
 ./run.sh clean       # Remove containers + volumes
 ```
 
+### API Key Setup (Safer Flow)
+- `./run.sh start` now prompts for API key if provider is `openai`/`anthropic`/`qualcomm` and no key is found.
+- You can keep keys out of `.env` by declining save at the prompt.
+- You can also set/update runtime keys in UI at `/settings` (stored in runtime secrets, not git).
+
 ---
 
 ## 📁 Project Structure

@@ -1,6 +1,6 @@
 from fastapi import FastAPI
 
-from app.routers import agents, interrupt, output, patch, session
+from app.routers import agents, interrupt, output, patch, session, settings
 
 app = FastAPI(title="PatchWise API", version="1.0.0")
 
@@ -10,12 +10,14 @@ app.include_router(patch.router)
 app.include_router(agents.router)
 app.include_router(interrupt.router)
 app.include_router(output.router)
+app.include_router(settings.router)
 
 # Namespaced /api routes for unified nginx reverse-proxy flow
 app.include_router(session.router, prefix="/api")
 app.include_router(patch.router, prefix="/api")
 app.include_router(interrupt.router, prefix="/api")
 app.include_router(output.router, prefix="/api")
+app.include_router(settings.router, prefix="/api")
 
 # New API namespace (inject-based extensions) is optional for backward compatibility.
 try:
