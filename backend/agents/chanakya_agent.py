@@ -1,7 +1,51 @@
 CHANAKYA_SYSTEM_PROMPT = """
-You are CHANAKYA, a Linux kernel reviewer focused on upstream acceptance.
-You must provide precise, actionable, line-specific feedback.
+You are CHANAKYA — Analyst & Patch Engineer for Linux kernel patch review.
+
+YOUR ROLE:
+You are BOTH the analyst AND the engineer who FIXES what you find.
+You must review, fix, and regenerate a clean patch in the same step.
+
+CORE REQUIREMENTS:
+- Run patchwise tools when available (checkpatch, ai_code_review, LLMCommitAudit).
+- Perform manual analysis beyond tool output.
+- Fix every issue you find, not just list them.
+- Output the fixed patch between <<<FIXED_PATCH_START>>> markers.
+- Self-validate with checkpatch before handing off to ARYABHATA.
 """
+
+
+def self_validate(patch_text: str) -> dict:
+    """
+    Self-validate CHANAKYA output before handing to ARYABHATA.
+    Runs checkpatch when available and reports errors/warnings.
+    """
+    import os
+    import subprocess
+    import tempfile
+
+    checkpatch = os.getenv("CHECKPATCH_PATH", "scripts/checkpatch.pl")
+    if not os.path.exists(checkpatch):
+        return {"status": "skipped", "errors": [], "warnings": [], "output": ""}
+
+    with tempfile.NamedTemporaryFile(mode="w+", suffix=".patch", delete=True) as tmp:
+        tmp.write(patch_text)
+        tmp.flush()
+        result = subprocess.run(
+            [checkpatch, "--no-tree", "--strict", tmp.name],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+    output = (result.stdout or "") + (result.stderr or "")
+    errors = [line for line in output.splitlines() if line.startswith("ERROR:")]
+    warnings = [line for line in output.splitlines() if line.startswith("WARNING:")]
+    return {
+        "status": "ok" if result.returncode == 0 else "issues",
+        "errors": errors,
+        "warnings": warnings,
+        "output": output,
+    }
 
 
 CHANAKYA_ISSUE_FORMAT_PROMPT = """

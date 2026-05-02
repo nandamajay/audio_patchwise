@@ -169,4 +169,4 @@ def health() -> dict:
 
 @app.get("/api/health")
 def api_health() -> dict:
-    return {"status": "ok", "service": "patchwise-backend"}
+    return {"status": "healthy", "service": "patchwise-backend"}

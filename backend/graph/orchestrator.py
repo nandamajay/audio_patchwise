@@ -168,6 +168,7 @@ async def run_session_loop(session_id: str) -> None:
         "version_issues": [],
         "messages": [],
         "user_hints": [],
+        "seen_round_ids": set(),
     }
     state["_stream_callback"] = lambda payload: asyncio.create_task(
         websocket_manager.broadcast(session_id, payload)
@@ -203,6 +204,13 @@ async def run_session_loop(session_id: str) -> None:
 
     while state["current_round"] <= state["max_rounds"]:
         round_number = state["current_round"]
+        round_guard = state.get("seen_round_ids", set())
+        if round_number in round_guard:
+            logger.warning("[RoundGuard] Duplicate round detected, skipping.")
+            state["current_round"] += 1
+            continue
+        round_guard.add(round_number)
+        state["seen_round_ids"] = round_guard
         await on_state_change(state, "round_started")
         before_patch = state.get("current_patch", "")
         before_refs = len(state.get("similar_patches", []))

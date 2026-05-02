@@ -66,6 +66,7 @@ export default function useAgentStream(sessionId) {
       connectedRef.current = false;
       activeSessionRef.current = null;
       if (timerRef.current) clearTimeout(timerRef.current);
+      // socket cleanup on unmount
       wsRef.current?.close();
       wsRef.current = null;
     };

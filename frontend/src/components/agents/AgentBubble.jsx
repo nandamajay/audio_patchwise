@@ -32,7 +32,7 @@ export default function AgentBubble({
       {isSystem ? null : isChanakya ? <ChanakyaAvatar size={48} /> : <AryabhataAvatar size={48} />}
       <div className={`bubble-content ${bubbleClass}`}>
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 6 }}>
-          <strong>{isSystem ? "🔔 System" : isChanakya ? "CHANAKYA (Reviewer)" : "ARYABHATA (Developer)"}</strong>
+          <strong>{isSystem ? "🔔 System" : isChanakya ? "CHANAKYA (Analyst & Patch Engineer)" : "ARYABHATA (Validator & Quality Gatekeeper)"}</strong>
           {message.metadata?.severity ? (
             <StatusBadge label={message.metadata.severity} tone={badgeTone[message.metadata.severity] || "default"} />
           ) : null}
@@ -105,7 +105,7 @@ export default function AgentBubble({
         {message.thought_chain ? (
           <ThoughtChainTree
             thoughtChain={message.thought_chain}
-            agentName={message.agent === "chanakya" ? "CHANAKYA (Reviewer)" : "ARYABHATA (Developer)"}
+            agentName={message.agent === "chanakya" ? "CHANAKYA (Analyst & Patch Engineer)" : "ARYABHATA (Validator & Quality Gatekeeper)"}
             agentColor={message.agent === "chanakya" ? "var(--accent-blue)" : "var(--accent-purple)"}
           />
         ) : null}

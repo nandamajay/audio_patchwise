@@ -1,8 +1,8 @@
 import { useEffect } from 'react';
 
 export const INPUT_PATTERNS = {
-  LORE_URL: /https?:\/\/lore\.kernel\.org\/[^\s]+/,
-  LORE_ALSA: /https?:\/\/lore\.kernel\.org\/alsa-devel\/[^\s]+/,
+  LORE_URL: /https?:\/\/(lore|lkml)\.kernel\.org\/[^\s]+/i,
+  LORE_ALSA: /https?:\/\/(lore|lkml)\.kernel\.org\/alsa-devel\/[^\s]+/i,
   GERRIT_URL: /https?:\/\/[^\s]+gerrit[^\s]+\/c\/[^\s]+/,
   GITHUB_PR: /https?:\/\/github\.com\/[^\s]+\/pull\/[0-9]+/,
   PATCH_FILE: /^From [0-9a-f]{40} Mon Sep 17/m,

@@ -1,8 +1,9 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 
-import { detectInputType, useInputAutoDetect } from './InputDetector';
 
 const TABS = ['RAW', 'FILE', 'GERRIT', 'LORE'];
+const LORE_URL_PATTERN = /https?:\/\/(lore\.kernel\.org|lkml\.kernel\.org)\/[^\s]+/i;
+const GERRIT_URL_PATTERN = /https?:\/\/[^\s]*gerrit[^\s]*/i;
 
 function readFilesAsPatchText(fileList) {
   const readers = fileList.map((file) => new Promise((resolve) => {
@@ -49,40 +50,38 @@ export default function PatchInput({ onPatchReady = () => {}, value = '', onChan
     });
   }, []);
 
-  useInputAutoDetect(rawValue, activeTab, setActiveTab, showBanner);
-
-  useEffect(() => {
-    if (!rawValue.trim()) return;
-    const detected = detectInputType(rawValue.trim());
-
-    if (detected === 'LORE_URL') {
-      const url = rawValue.trim();
+  const handleRawInputChange = (value) => {
+    const trimmed = value.trim();
+    if (LORE_URL_PATTERN.test(trimmed)) {
       setActiveTab('LORE');
-      setLoreUrl(url);
+      setLoreUrl(trimmed);
       setRawValue('');
       onChange('');
-      setBanner({
+      showBanner({
         type: 'info',
         icon: 'LINK',
-        message: 'Lore.kernel.org URL detected. Switched to LORE tab and fetching patches...',
+        message: 'Lore.kernel.org URL detected. switched to lore tab and fetching patches...',
         autoClose: 5000,
       });
-      fetchLorePatches(url);
-    } else if (detected === 'GERRIT_URL') {
-      const url = rawValue.trim();
+      fetchLorePatches(trimmed);
+      return;
+    }
+    if (GERRIT_URL_PATTERN.test(trimmed)) {
       setActiveTab('GERRIT');
-      setGerritUrl(url);
+      setGerritUrl(trimmed);
       setRawValue('');
-      onChange(url);
-      setBanner({
+      onChange(trimmed);
+      showBanner({
         type: 'info',
         icon: 'GERRIT',
-        message: 'Gerrit URL detected. Switched to GERRIT tab.',
+        message: 'Gerrit URL detected. switched to gerrit tab.',
         autoClose: 4000,
       });
+      return;
     }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [rawValue]);
+    setRawValue(value);
+    onChange(value);
+  };
 
   useEffect(() => {
     if (banner?.autoClose) {
@@ -204,9 +203,7 @@ export default function PatchInput({ onPatchReady = () => {}, value = '', onChan
             className="textarea patch-textarea"
             value={rawValue}
             onChange={(e) => {
-              const next = e.target.value;
-              setRawValue(next);
-              onChange(next);
+              handleRawInputChange(e.target.value);
             }}
             placeholder="Paste raw patch content or any URL (lore.kernel.org, Gerrit)..."
             rows={12}

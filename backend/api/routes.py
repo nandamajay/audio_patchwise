@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 
 from fastapi import APIRouter, BackgroundTasks
+from pydantic import BaseModel
 
 from app.config import settings
 from core.llm_factory import get_available_models
@@ -13,6 +14,10 @@ from monitoring.health_monitor import HealthMonitor
 from submission.dry_run import CheckStatus, DryRunManager
 
 router = APIRouter(prefix="/api", tags=["advanced"])
+
+
+class KernelPathRequest(BaseModel):
+    path: str
 
 
 @router.post("/submission/dry-run")
@@ -157,3 +162,27 @@ async def get_patchwise_status():
         return skill.get_status()
     except Exception as exc:
         return {"installed": False, "error": str(exc)}
+
+
+@router.post("/validate-kernel-path")
+async def validate_kernel_path(request: KernelPathRequest):
+    path = request.path
+    is_valid = (
+        os.path.isdir(path)
+        and os.path.exists(os.path.join(path, "scripts/checkpatch.pl"))
+        and os.path.exists(os.path.join(path, "Makefile"))
+    )
+    return {
+        "valid": is_valid,
+        "has_checkpatch": os.path.exists(os.path.join(path, "scripts/checkpatch.pl")),
+        "has_git": os.path.isdir(os.path.join(path, ".git")),
+    }
+
+
+@router.get("/debug/frontend-errors")
+async def get_frontend_errors():
+    """
+    Lightweight debug endpoint for validation scripts.
+    Frontend does not currently push Monaco error telemetry; return zero by default.
+    """
+    return {"monaco_errors": 0}

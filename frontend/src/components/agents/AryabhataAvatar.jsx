@@ -10,7 +10,7 @@ export default function AryabhataAvatar({ size = 54 }) {
         <path d="M45 81H75" stroke="var(--aryabhata-color)" strokeWidth="3" />
         <path d="M86 82L95 73L104 82L95 91Z" stroke="var(--aryabhata-color)" strokeWidth="3" />
       </svg>
-      <span className="small">ARYABHATA (Developer)</span>
+      <span className="small">ARYABHATA (Validator & Quality Gatekeeper)</span>
     </div>
   );
 }

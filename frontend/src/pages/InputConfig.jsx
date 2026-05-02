@@ -9,6 +9,7 @@ import MaintainerSelector from "../components/MaintainerSelector";
 import GlassCard from "../components/layout/GlassCard";
 import GradientHeader from "../components/layout/GradientHeader";
 import PatchInput from "../components/patch/PatchInput";
+import { detectInputType } from "../components/InputDetector";
 import usePatchSubmit from "../hooks/usePatchSubmit";
 import useSessionStore from "../store/sessionStore";
 
@@ -32,7 +33,7 @@ export default function InputConfig() {
     if (!patchInput.trim()) missing.push("patch input");
     if (!kernelVersion.trim()) missing.push("kernel version");
     if (!subsystem.trim()) missing.push("subsystem");
-    if (!sourcePath.trim()) missing.push("source path");
+    // Kernel path is optional; keep context flexible.
     return missing;
   }, [patchInput, kernelVersion, subsystem, sourcePath]);
 
@@ -56,6 +57,22 @@ export default function InputConfig() {
 
   const onStart = async () => {
     if (missingContext.length) return;
+    const trimmed = String(patchInput || "").trim();
+    if (!trimmed) return;
+    const detected = detectInputType(trimmed);
+    if (detected === "LORE_URL" || detected === "GERRIT_URL") {
+      window.alert("This looks like a URL. Use the LORE or GERRIT tab instead.");
+      return;
+    }
+    const hasPatchMarkers =
+      trimmed.startsWith("From ") ||
+      trimmed.includes("diff --git") ||
+      trimmed.includes("--- a/") ||
+      trimmed.includes("+++ b/");
+    if (!hasPatchMarkers) {
+      window.alert("Input does not look like a valid patch. Paste git format-patch output.");
+      return;
+    }
     resetConversation();
     const sessionId = await submit();
     setField("sessionId", sessionId);
@@ -73,13 +90,13 @@ export default function InputConfig() {
         <GlassCard>
           <ChanakyaAvatar size={120} />
           <div style={{ marginTop: 8 }}>
-            <span className="badge">Reviewer</span>
+            <span className="badge">Analyst & Patch Engineer</span>
           </div>
         </GlassCard>
         <GlassCard>
           <AryabhataAvatar size={120} />
           <div style={{ marginTop: 8 }}>
-            <span className="badge">Developer</span>
+            <span className="badge">Validator & Quality Gatekeeper</span>
           </div>
         </GlassCard>
       </div>

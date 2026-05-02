@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
+import re
 from typing import Any, Optional
 
 from agents.chanakya_agent import CHANAKYA_ISSUE_FORMAT_PROMPT
@@ -11,20 +13,88 @@ from app.skills.search_skill import SearchSkill
 from core.llm_factory import get_llm
 from core.patchwise_skill import PatchWiseResult, PatchWiseSkill
 from agents.version_intelligence import fetch_version_history
+from agents.aryabhata_fix_engine import AryabhataFixEngine
+from agents.cover_letter_generator import generate_cover_letter_if_missing
 from intelligence.cover_letter_reviewer import CoverLetterReviewer
 from intelligence.patch_version_intelligence import PatchVersionIntelligence
+from models.patch_models import LineEdit, ReviewIssue
 
 
-CHANAKYA_SYSTEM_PROMPT = (
-    "You are CHANAKYA, a sharp analytical kernel patch reviewer. "
-    "You must provide line-specific, structured, upstream-relevant issues.\n\n"
-    + CHANAKYA_ISSUE_FORMAT_PROMPT
-)
+CHANAKYA_SYSTEM_PROMPT = """
+You are CHANAKYA — Analyst & Patch Engineer for Linux kernel patch review.
+
+YOUR ROLE (CRITICAL — Read carefully):
+You are NOT just a reviewer who lists issues for someone else to fix.
+You are BOTH the analyst AND the engineer who FIXES what you find.
+You behave exactly like the QGenie CLI patchwise workflow:
+  1. Analyze the patch thoroughly
+  2. Run patchwise tools (checkpatch, ai_code_review, LLMCommitAudit)
+  3. DO manual code analysis beyond tool output
+  4. FIX every issue you find — in the SAME step
+  5. Generate a REAL fixed patch file
+  6. Self-validate your fix with checkpatch before submitting
+
+WHAT YOU MUST DO FOR EVERY REVIEW SESSION:
+
+  STEP 1 — PATCH INPUT PROCESSING:
+    - Detect patch version (v1, v2, v3...)
+    - If versioned: fetch ALL previous versions from lore.kernel.org
+    - Parse version history: what was flagged, what was fixed, what was missed
+    - Check cover letter: subject, changelog, Link: to previous version, diffstat
+    - If cover letter has placeholders → GENERATE REAL CONTENT
+
+  STEP 2 — TOOL ANALYSIS:
+    Run in this order:
+    a) patchwise --reviews Checkpatch LLMCommitAudit AiCodeReview
+       --provider https://qgenie-chat.qualcomm.com/v1
+    b) If patchwise fails → fallback to checkpatch.pl directly
+    c) Parse ALL tool output into structured issues
+
+  STEP 3 — MANUAL CODE ANALYSIS (CRITICAL — beyond tool output):
+    Examine the actual diff carefully:
+    - Check function signatures for error propagation (void vs int return)
+    - Check callers of modified functions for broken error handling
+    - Check header files for stale declarations
+    - Check PM runtime patterns (devm_ vs non-devm_ consistency)
+    - Check cross-line impact (change on line N affects logic on line M)
+
+  STEP 4 — FIX ALL ISSUES (DO NOT JUST LIST THEM):
+    For EACH issue found:
+    a) Apply targeted fix to source file or patch hunk
+    b) Regenerate clean patch output
+    c) Self-validate with checkpatch
+    d) Output fixed patch with <<<FIXED_PATCH_START>>> markers
+
+  STEP 5 — COVER LETTER:
+    If cover letter has placeholder text OR is missing changelog:
+    → GENERATE real cover letter content from patch context
+    → Use format: [PATCH v{N} 0/{M}] {subsystem}: {brief description}
+    → Include: Changes in v{N} section with REAL changelog
+    → Include: Link: https://lore.kernel.org/... to previous version
+    → Output as separate <<<COVER_LETTER_START>>> markers
+    → Mark as DRAFT — requires user approval before applying
+
+  STEP 6 — STRUCTURED OUTPUT:
+    Output MUST include ALL of these for each issue:
+    {
+      "issue_id": "R{round}_I{num}",
+      "type": "STYLE|LOGIC|MEMORY|COMPLIANCE|COMMIT|COVER_LETTER",
+      "severity": "BLOCKING|CRITICAL|WARNING|INFO",
+      "file": "drivers/.../file.c",
+      "line": 42,
+      "problematic_code": "bad line",
+      "fix_applied": "corrected line",
+      "explanation": "why this is wrong",
+      "reference": "https://www.kernel.org/doc/html/latest/...",
+      "fixed_in_patch": true
+    }
+"""
 
 pvi = PatchVersionIntelligence()
 cover_reviewer = CoverLetterReviewer()
 _PATCHWISE_SKILL: PatchWiseSkill | None = None
 _PATCHWISE_INIT_ERROR: str | None = None
+logger = logging.getLogger("uvicorn.error")
 
 
 def _ensure_list(state: dict[str, Any], key: str) -> list[Any]:
@@ -33,6 +103,35 @@ def _ensure_list(state: dict[str, Any], key: str) -> list[Any]:
         value = []
         state[key] = value
     return value
+
+
+COMMON_KERNEL_PATHS = [
+    "/local/mnt/workspace/upstream_patches/xo_sd_LPI/linux-next",
+    "/local/mnt/workspace/linux-next",
+    "/workspace/linux-next",
+    "/kernel/linux-next",
+    "/tmp/patchwise/sandbox/kernel",
+]
+
+
+def _resolve_kernel_path(source_hint: str, patch_text: str) -> Optional[str]:
+    if source_hint and os.path.isdir(source_hint):
+        if os.path.exists(os.path.join(source_hint, "scripts/checkpatch.pl")):
+            return source_hint
+
+    match = re.search(r"^diff --git a/(.+?) b/", patch_text, re.MULTILINE)
+    candidate = match.group(1) if match else ""
+
+    for base in COMMON_KERNEL_PATHS:
+        if not os.path.isdir(base):
+            continue
+        if candidate and os.path.exists(os.path.join(base, candidate)):
+            if os.path.exists(os.path.join(base, "scripts/checkpatch.pl")):
+                return base
+        if os.path.exists(os.path.join(base, "scripts/checkpatch.pl")):
+            return base
+
+    return None
 
 
 def _emit(state: dict[str, Any], payload: dict[str, Any]) -> None:
@@ -115,6 +214,61 @@ def _default_fix(problematic: str, issue: dict[str, Any]) -> str:
     if issue_type == "COMPLIANCE":
         return "Signed-off-by: Author <email>"
     return problematic
+
+
+def _line_at(patch: str, line_number: int) -> str:
+    lines = patch.splitlines()
+    if not lines:
+        return ""
+    line_number = max(1, min(line_number, len(lines)))
+    return lines[line_number - 1]
+
+
+def _extract_changed_lines(diff_text: str) -> list[int]:
+    changed: list[int] = []
+    current_new_line = 0
+    for line in (diff_text or "").splitlines():
+        hunk_match = re.match(r"^@@ -\\d+(?:,\\d+)? \\+(\\d+)(?:,\\d+)? @@", line)
+        if hunk_match:
+            current_new_line = int(hunk_match.group(1))
+            continue
+        if line.startswith("+") and not line.startswith("+++"):
+            changed.append(current_new_line)
+            current_new_line += 1
+            continue
+        if line.startswith("-") and not line.startswith("---"):
+            continue
+        if line.startswith((" ", "\\t")):
+            current_new_line += 1
+    return sorted(set(changed))
+
+
+def _default_fixed_line(issue: ReviewIssue, current_patch: str) -> str:
+    if issue.suggested_fix:
+        return issue.suggested_fix
+    problematic = issue.problematic_code or _line_at(current_patch, issue.line_number)
+    return _default_fix(problematic, {"issue_type": issue.category})
+
+
+def _coerce_issue(raw: dict[str, Any], idx: int, round_id: int, patch: str) -> ReviewIssue:
+    line_number = int(raw.get("line_number", 1) or 1)
+    problematic = raw.get("problematic_code") or _line_at(patch, line_number)
+    return ReviewIssue(
+        issue_id=raw.get("issue_id", f"R{round_id}_{idx:03d}"),
+        category=raw.get("category", raw.get("issue_type", "STYLE")),
+        severity=raw.get("severity", "WARNING"),
+        line_number=line_number,
+        file_path=raw.get("file_path", "unknown"),
+        hunk_context=raw.get("hunk_context", ""),
+        error_message=raw.get("error_message", raw.get("description", "")),
+        problematic_code=problematic,
+        suggested_fix=raw.get("suggested_fix", raw.get("suggestion", "")),
+        explanation=raw.get("explanation", raw.get("description", "")),
+        reference=raw.get("reference"),
+        is_recurring=bool(raw.get("is_recurring", raw.get("recurring", False))),
+        previous_round=raw.get("previous_round", raw.get("first_seen")),
+        round_number=round_id,
+    )
 
 
 def _extract_json(text: str) -> Any | None:
@@ -486,6 +640,10 @@ async def chanakya_review_node(state: PatchWiseState) -> PatchWiseState:
     round_id = state.get("current_round", 1)
     patch_text = state.get("current_patch") or state.get("patch_input", "")
     source_context = state.get("source_path", "")
+    resolved_kernel_path = _resolve_kernel_path(source_context, patch_text)
+    if resolved_kernel_path and resolved_kernel_path != source_context:
+        state["source_path"] = resolved_kernel_path
+    source_context = resolved_kernel_path or source_context
     patch_lines = patch_text.splitlines()
 
     hint = state.get("interrupt_hint")
@@ -500,8 +658,7 @@ async def chanakya_review_node(state: PatchWiseState) -> PatchWiseState:
     skill, skill_error = _get_patchwise_skill()
     if skill:
         try:
-            resolved_kernel_path = source_context if (source_context and os.path.isdir(source_context)) else None
-            if source_context and not resolved_kernel_path:
+            if source_context and not os.path.isdir(source_context):
                 _emit(
                     state,
                     {
@@ -516,7 +673,7 @@ async def chanakya_review_node(state: PatchWiseState) -> PatchWiseState:
                 )
             patchwise_result = skill.review_patch_file(
                 patch_content=patch_text,
-                kernel_path=resolved_kernel_path,
+                kernel_path=source_context if os.path.isdir(source_context) else None,
                 subsystem=state.get("subsystem", "sound/soc"),
             )
             patchwise_status = {
@@ -643,6 +800,66 @@ async def chanakya_review_node(state: PatchWiseState) -> PatchWiseState:
         pw_result=patchwise_result,
     )
 
+    review_issues = [
+        _coerce_issue(issue, idx + 1, round_id, patch_text)
+        for idx, issue in enumerate(structured_issues)
+    ]
+    llm_fixes: dict[str, LineEdit] = {}
+    for issue in review_issues:
+        fixed_line = issue.suggested_fix or _default_fixed_line(issue, patch_text)
+        llm_fixes[issue.issue_id] = LineEdit(
+            line_number=issue.line_number,
+            original_line=issue.problematic_code or _line_at(patch_text, issue.line_number),
+            fixed_line=fixed_line,
+            issue_id=issue.issue_id,
+            category=issue.category,
+            justification=issue.explanation or "Applied targeted upstream-safe correction.",
+        )
+
+    fix_engine = AryabhataFixEngine()
+    fix_result = None
+    fixed_patch = patch_text
+    if review_issues:
+        fix_result = fix_engine.apply_fixes_sync(
+            current_patch=patch_text,
+            review_issues=review_issues,
+            llm_fixes=llm_fixes,
+        )
+        fixed_patch = fix_result.fixed_patch
+        state["current_patch"] = fixed_patch
+        state["current_fixed_patch"] = fixed_patch
+
+    cover_letter_draft = None
+    if cover_issues:
+        state["patches"] = [patch_text]
+        cover_letter_draft = await generate_cover_letter_if_missing(
+            state=state,
+            llm=None,
+            cover_letter_issues=cover_issues,
+        )
+        if cover_letter_draft:
+            state["cover_letter_draft"] = cover_letter_draft
+            state["cover_letter_approved"] = False
+            logger.info("cover_letter fixed PLACEHOLDER_USE=0")
+            _emit(
+                state,
+                {
+                    "agent": "chanakya",
+                    "type": "cover_letter_draft",
+                    "round": round_id,
+                    "content": cover_letter_draft,
+                    "metadata": {"draft": True},
+                },
+            )
+
+    applied = fix_result.applied_fixes if fix_result else {}
+    for issue in structured_issues:
+        issue_id = issue.get("issue_id")
+        edit = applied.get(issue_id) or llm_fixes.get(issue_id)
+        issue["type"] = issue.get("category")
+        issue["fix_applied"] = edit.fixed_line if edit else ""
+        issue["fixed_in_patch"] = bool(edit)
+
     for issue in structured_issues:
         _emit(
             state,
@@ -680,22 +897,9 @@ async def chanakya_review_node(state: PatchWiseState) -> PatchWiseState:
             },
         )
 
-    critical_issues = [issue for issue in structured_issues if issue.get("severity") == "CRITICAL"]
     issue_count = len(structured_issues)
     quality_score = max(0.0, 100.0 - float(issue_count * 14))
-    verdict = "LGTM" if not structured_issues else "NEEDS_WORK"
-
-    if structured_issues and not critical_issues and round_id >= 2:
-        _emit(
-            state,
-            {
-                "agent": "chanakya",
-                "type": "minor_issues_only",
-                "round": round_id,
-                "content": "Only non-critical issues remain.",
-                "metadata": {"issue_count": issue_count},
-            },
-        )
+    verdict = "PENDING"
 
     round_payload = {
         "round": round_id,
@@ -705,6 +909,8 @@ async def chanakya_review_node(state: PatchWiseState) -> PatchWiseState:
         "quality_score": quality_score,
         "analysis_mode": analysis_mode,
         "patchwise": patchwise_status,
+        "fixed_patch": fixed_patch,
+        "validation": fix_result.validation_result if fix_result else None,
     }
 
     state["latest_review"] = round_payload
@@ -719,25 +925,99 @@ async def chanakya_review_node(state: PatchWiseState) -> PatchWiseState:
         }
     )
 
-    state["quality_score"] = quality_score
-    state["verdict"] = verdict
+    fix_summary: list[dict[str, Any]] = []
+    changes_made: list[dict[str, Any]] = []
+    for issue in review_issues:
+        edit = applied.get(issue.issue_id) or llm_fixes.get(issue.issue_id)
+        fix_summary.append(
+            {
+                "issue_id": issue.issue_id,
+                "category": issue.category,
+                "line": issue.line_number,
+                "problem": issue.error_message,
+                "fix": edit.fixed_line if edit else issue.suggested_fix,
+                "status": "FIXED" if edit else "SKIPPED",
+            }
+        )
+        if edit:
+            changes_made.append(
+                {
+                    "issue_id": issue.issue_id,
+                    "issue_type": issue.category,
+                    "line": issue.line_number,
+                    "original": edit.original_line,
+                    "fixed": edit.fixed_line,
+                    "reason": edit.justification,
+                }
+            )
 
-    final_type = "lgtm" if verdict == "LGTM" else "verdict"
+    marked_patch_main = (
+        "<<<FIXED_PATCH_START>>>\n"
+        f"{fixed_patch.rstrip()}\n"
+        "<<<FIXED_PATCH_END>>>"
+    )
+    marked_patch = marked_patch_main
+    if cover_letter_draft:
+        marked_patch = (
+            "<<<COVER_LETTER_START>>>\n"
+            f"{cover_letter_draft.rstrip()}\n"
+            "<<<COVER_LETTER_END>>>\n\n"
+            f"{marked_patch_main}"
+        )
+
+    diff_from_previous = fix_result.diff_from_previous if fix_result else ""
+    changed_lines = _extract_changed_lines(diff_from_previous)
+
     _emit(
         state,
         {
             "agent": "chanakya",
-            "type": final_type,
+            "type": "fix_complete",
             "round": round_id,
-            "content": "LGTM" if verdict == "LGTM" else "Needs work",
-            "metadata": {
-                "quality_score": quality_score,
-                "issue_count": issue_count,
-                "analysis_mode": analysis_mode,
-                "patchwise": patchwise_status,
-            },
+            "content": marked_patch,
+            "fix_summary": fix_summary,
+            "changes_made": changes_made,
+            "diff_from_previous": diff_from_previous,
+            "fixed_patch": fixed_patch,
+            "original_patch": patch_text,
+            "checkpatch_output": (fix_result.validation_result.get("checkpatch_output") if fix_result else ""),
+            "validation_passed": bool(fix_result.validation_result.get("passed", False)) if fix_result else False,
+            "patch_marker_start": "<<<FIXED_PATCH_START>>>",
+            "patch_marker_end": "<<<FIXED_PATCH_END>>>",
+            "marked_patch": marked_patch,
+            "changed_lines": changed_lines,
+            "requires_approval": bool(cover_letter_draft),
+            "cover_letter_draft": cover_letter_draft,
         },
     )
+    logger.info("FIXED_PATCH_START emitted by CHANAKYA")
+
+    _ensure_list(state, "fix_history").append(
+        {
+            "round": round_id,
+            "fixes_applied": len([f for f in fix_summary if f.get("status") == "FIXED"]),
+            "changes_made": changes_made,
+            "diff": diff_from_previous,
+            "validation_passed": bool(fix_result.validation_result.get("passed", False)) if fix_result else False,
+        }
+    )
+    _ensure_list(state, "fix_attempts").append(
+        {
+            "round": round_id,
+            "fixes": fix_summary,
+            "changes_made": changes_made,
+            "summary": f"Applied {len([f for f in fix_summary if f.get('status') == 'FIXED'])} fix(es).",
+            "diff_from_previous": diff_from_previous,
+            "fixed_patch": fixed_patch,
+            "original_patch": patch_text,
+            "validation_passed": bool(fix_result.validation_result.get("passed", False)) if fix_result else False,
+            "patch_marker_start": "<<<FIXED_PATCH_START>>>",
+            "patch_marker_end": "<<<FIXED_PATCH_END>>>",
+        }
+    )
+
+    state["quality_score"] = quality_score
+    state["verdict"] = verdict
 
     state["interrupt_hint"] = None
     return state

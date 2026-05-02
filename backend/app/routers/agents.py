@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import traceback
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
@@ -17,6 +18,8 @@ except Exception:  # pragma: no cover
 
 router = APIRouter(tags=["agents"])
 RUN_TASKS: dict[str, asyncio.Task] = {}
+logger = logging.getLogger(__name__)
+uvicorn_logger = logging.getLogger("uvicorn.error")
 
 
 def _list_or_empty(value):
@@ -311,6 +314,8 @@ async def agent_stream(websocket: WebSocket, session_id: str) -> None:
     if session_id in SESSION_STORE:
         SESSION_STORE[session_id] = _normalize_state(SESSION_STORE[session_id])
     await connection_manager.connect(session_id, websocket)
+    logger.info("WebSocket connected")
+    uvicorn_logger.info("WebSocket connected")
     try:
         await connection_manager.broadcast(
             session_id,

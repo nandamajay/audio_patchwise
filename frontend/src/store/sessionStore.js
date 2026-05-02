@@ -204,7 +204,9 @@ const useSessionStore = create((set, get) => ({
     set(() => ({ loadingSessions: true }));
     try {
       const response = await api.get("/sessions/");
-      set(() => ({ sessions: response.data.sessions || [] }));
+      const payload = response.data;
+      const sessions = Array.isArray(payload) ? payload : (payload.sessions || []);
+      set(() => ({ sessions }));
     } catch {
       set(() => ({ sessions: [] }));
     } finally {

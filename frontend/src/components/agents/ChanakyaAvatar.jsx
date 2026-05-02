@@ -10,7 +10,7 @@ export default function ChanakyaAvatar({ size = 54 }) {
         <circle cx="92" cy="80" r="11" stroke="var(--chanakya-color)" strokeWidth="3" />
         <line x1="100" y1="88" x2="110" y2="99" stroke="var(--chanakya-color)" strokeWidth="3" />
       </svg>
-      <span className="small">CHANAKYA (Reviewer)</span>
+      <span className="small">CHANAKYA (Analyst & Patch Engineer)</span>
     </div>
   );
 }

@@ -25,6 +25,7 @@ export default function ContextBox({ patchContent, value, onChange }) {
     notes: value.notes || "",
     autoDetected: false,
   });
+  const [pathStatus, setPathStatus] = useState("idle");
 
   useEffect(() => {
     setContextData((prev) => {
@@ -83,6 +84,20 @@ export default function ContextBox({ patchContent, value, onChange }) {
     return "Provide subsystem, kernel version, and source path context.";
   }, [contextData.autoDetected]);
 
+  const validateKernelPath = async (path) => {
+    try {
+      const resp = await fetch("/api/validate-kernel-path", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ path }),
+      });
+      const data = await resp.json();
+      setPathStatus(data?.valid ? "valid" : "invalid");
+    } catch {
+      setPathStatus("invalid");
+    }
+  };
+
   return (
     <div className="glass card">
       <h3 style={{ marginBottom: 10 }}>Context</h3>
@@ -99,12 +114,59 @@ export default function ContextBox({ patchContent, value, onChange }) {
           placeholder="Kernel version"
           onChange={(event) => setContextData((prev) => ({ ...prev, kernelVersion: event.target.value }))}
         />
-        <input
-          className="input"
-          value={contextData.sourcePath}
-          placeholder="Source path"
-          onChange={(event) => setContextData((prev) => ({ ...prev, sourcePath: event.target.value }))}
-        />
+        <div style={{ display: "grid", gap: 6 }}>
+          <input
+            className="input"
+            value={contextData.sourcePath}
+            placeholder="Kernel source path (optional)"
+            onChange={(event) => {
+              setContextData((prev) => ({ ...prev, sourcePath: event.target.value }));
+              setPathStatus("idle");
+            }}
+            onBlur={() => contextData.sourcePath && validateKernelPath(contextData.sourcePath)}
+          />
+          <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+            <button
+              type="button"
+              className="btn secondary"
+              onClick={() => {
+                const next = contextData.sourcePath || "";
+                if (next) validateKernelPath(next);
+              }}
+            >
+              Validate Path
+            </button>
+            <button
+              type="button"
+              className="btn secondary"
+              // browse kernel path
+              onClick={async () => {
+                if (typeof window.showDirectoryPicker !== "function") {
+                  window.alert("Directory picker not supported; paste the path manually.");
+                  return;
+                }
+                try {
+                  const handle = await window.showDirectoryPicker();
+                  const path = handle?.name ? handle.name : "";
+                  if (path) {
+                    setContextData((prev) => ({ ...prev, sourcePath: path }));
+                    setPathStatus("idle");
+                  }
+                } catch {
+                  // user canceled
+                }
+              }}
+            >
+              Browse Kernel Path
+            </button>
+            {pathStatus === "valid" ? (
+              <span className="small" style={{ color: "#86efac" }}>Kernel source found</span>
+            ) : null}
+            {pathStatus === "invalid" ? (
+              <span className="small" style={{ color: "#fca5a5" }}>Path not found</span>
+            ) : null}
+          </div>
+        </div>
       </div>
       {contextData.autoDetected ? <span className="badge auto-detected" style={{ marginTop: 8 }}>✨ Auto-detected from patch</span> : null}
       <p className="small" style={{ marginTop: 8 }}>{helper}</p>
