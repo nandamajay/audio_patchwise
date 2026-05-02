@@ -178,6 +178,63 @@ def init_db() -> None:
     if collab_schema_path.exists():
         conn.executescript(collab_schema_path.read_text())
 
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS screen_session_state (
+            name        TEXT PRIMARY KEY,
+            agent       TEXT NOT NULL,
+            session_id  TEXT NOT NULL,
+            work_dir    TEXT NOT NULL,
+            created_at  TEXT NOT NULL,
+            is_alive    BOOLEAN DEFAULT 1,
+            last_seen   TEXT
+        )
+        """
+    )
+
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS dev_compute_events (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            event_type  TEXT NOT NULL,
+            timestamp   TEXT NOT NULL,
+            details     TEXT,
+            session_ids TEXT
+        )
+        """
+    )
+
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS patchwise_executions (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id      TEXT NOT NULL,
+            agent           TEXT NOT NULL,
+            commits         TEXT,
+            reviews_run     TEXT,
+            fallback_used   BOOLEAN,
+            output          TEXT,
+            execution_mode  TEXT,
+            screen_name     TEXT,
+            duration_ms     INTEGER,
+            created_at      TEXT NOT NULL
+        )
+        """
+    )
+
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_screen_session
+            ON screen_session_state(session_id)
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_patchwise_session
+            ON patchwise_executions(session_id)
+        """
+    )
+
     conn.commit()
     logger.info("[DB] Database initialised with WAL mode")
 

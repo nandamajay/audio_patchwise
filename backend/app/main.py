@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import logging
 import os
+import asyncio
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
 from app.routers import agents, interrupt, output, patch, session, settings
+from core.screen_manager import screen_manager
+from core.ssh_pool import ExecutionMode, ssh_pool
 from startup_recovery import run_startup_recovery
 
 logger = logging.getLogger(__name__)
@@ -54,6 +57,7 @@ except Exception:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     init_db()
+    await ssh_pool.start()
     await start_write_worker()
 
     schedule_preset = os.getenv("SEED_SCHEDULE", "every_sunday_night")
@@ -69,6 +73,7 @@ async def lifespan(app: FastAPI):
 
     logger.info("[PatchWise] All services started - ready for concurrent users")
     yield
+    await ssh_pool.stop()
     if scheduler.running:
         scheduler.shutdown()
     logger.info("[PatchWise] Shutdown complete")
@@ -170,3 +175,48 @@ def health() -> dict:
 @app.get("/api/health")
 def api_health() -> dict:
     return {"status": "healthy", "service": "patchwise-backend"}
+
+
+@app.get("/api/dev-compute/health")
+async def dev_compute_health() -> dict:
+    connected = ssh_pool.is_connected()
+    mode = ssh_pool.mode.value
+    status = "connected" if connected else "reconnecting"
+    if mode == ExecutionMode.LOCAL_DOCKER.value:
+        status = "fallback"
+    screens = []
+    if connected:
+        try:
+            screens = await asyncio.wait_for(screen_manager.list_screens(), timeout=3)
+        except Exception:
+            screens = []
+    return {
+        "status": status,
+        "ssh_connected": connected,
+        "mode": mode,
+        "host": ssh_pool.host,
+        "kernel_path": ssh_pool.kernel_path,
+        "chanakya_screen": any("pw_chanakya_" in s for s in screens),
+        "aryabhata_screen": any("pw_aryabhata_" in s for s in screens),
+    }
+
+
+@app.get("/api/dev-compute/screens")
+async def dev_compute_screens() -> dict:
+    if not ssh_pool.is_connected():
+        return {"screens": []}
+    try:
+        screens = await asyncio.wait_for(screen_manager.list_screens(), timeout=3)
+    except Exception:
+        screens = []
+    return {"screens": screens}
+
+
+@app.post("/api/dev-compute/reconnect")
+async def force_reconnect() -> dict:
+    try:
+        await ssh_pool._connect()
+        await ssh_pool._restore_screen_sessions()
+        return {"status": "reconnected", "mode": ssh_pool.mode.value}
+    except Exception as exc:
+        return {"status": "failed", "error": str(exc), "mode": ssh_pool.mode.value}

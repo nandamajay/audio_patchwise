@@ -5,6 +5,10 @@ secrets:
     file: ./secrets/gerrit_id_rsa.pub
   github_token:
     file: ./secrets/github_token.txt
+  ssh_private_key:
+    file: ./secrets/ssh_id_rsa
+  qgenie_api_key:
+    file: ./secrets/qgenie_api_key.txt
 
 services:
   patchwise:
@@ -19,6 +23,8 @@ services:
       - gerrit_ssh_key
       - gerrit_ssh_pub
       - github_token
+      - ssh_private_key
+      - qgenie_api_key
     volumes:
       - patchwise_db:/workspace/data/db
       - patchwise_chromadb:/workspace/data/chromadb
@@ -26,6 +32,7 @@ services:
       - patchwise_logs:/workspace/data/logs
       - patchwise_backups:/workspace/data/backups
       - patchwise_profiles:/workspace/data/profiles
+      - patchwise_fixed_patches:/workspace/patchwise
     environment:
       - APP_PORT=${APP_PORT:-7000}
       - LLM_PROVIDER=${LLM_PROVIDER:-qgenie}
@@ -53,6 +60,8 @@ services:
       - GITHUB_REPO=${GITHUB_REPO:-}
       - GERRIT_SSH_KEY_PATH=/run/secrets/gerrit_ssh_key
       - GITHUB_TOKEN_PATH=/run/secrets/github_token
+      - DEV_COMPUTE_SSH_KEY=/run/secrets/ssh_private_key
+      - QGENIE_API_KEY_FILE=/run/secrets/qgenie_api_key
       - AUDIO_SUBSYSTEM_FOCUS=true
       - LKML_MAILING_LISTS=${LKML_MAILING_LISTS:-alsa-devel,linux-sound}
       - SQLITE_PATH=/workspace/data/db/patchwise.db
@@ -108,4 +117,10 @@ volumes:
     driver_opts:
       type: none
       device: ./data/profiles
+      o: bind
+  patchwise_fixed_patches:
+    driver: local
+    driver_opts:
+      type: none
+      device: ./data/fixed_patches
       o: bind

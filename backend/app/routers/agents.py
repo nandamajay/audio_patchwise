@@ -11,6 +11,8 @@ from app.agents.chanakya import chanakya_review_node
 from app.knowledge.sql_store import PatchSQLStore
 from app.knowledge.vector_store import PatchVectorStore
 from app.runtime import REPORT_STORE, SESSION_STORE, connection_manager
+from core.screen_manager import screen_manager
+from core.ssh_pool import AgentRole
 try:
     from api.dependencies import session_manager
 except Exception:  # pragma: no cover
@@ -206,6 +208,9 @@ async def run_agent_loop(session_id: str) -> None:
             pass
 
     try:
+        # Create isolated screen sessions for both agents at start of run.
+        await screen_manager.create_screen(AgentRole.CHANAKYA, session_id)
+        await screen_manager.create_screen(AgentRole.ARYABHATA, session_id)
         final_state = await asyncio.to_thread(_execute_review_cycle_sync, state)
     except Exception as exc:
         error_text = traceback.format_exc(limit=6)
@@ -247,6 +252,11 @@ async def run_agent_loop(session_id: str) -> None:
                 )
             except Exception:
                 pass
+        try:
+            if screen_manager.cleanup_on_complete:
+                await screen_manager.cleanup_screen(session_id)
+        except Exception:
+            pass
         return
     final_state = _normalize_state(final_state)
     final_state.pop("_stream_callback", None)
@@ -305,6 +315,11 @@ async def run_agent_loop(session_id: str) -> None:
             },
         },
     )
+    try:
+        if screen_manager.cleanup_on_complete:
+            await screen_manager.cleanup_screen(session_id)
+    except Exception:
+        pass
 
 
 @router.websocket("/ws/agent-stream/{session_id}")

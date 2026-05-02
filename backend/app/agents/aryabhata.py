@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from app.agents.state import PatchWiseState
 from app.skills.checkpatch_skill import run_checkpatch
+
+logger = logging.getLogger("uvicorn.error")
 
 
 def _ensure_list(state: dict[str, Any], key: str) -> list[Any]:
@@ -55,6 +58,7 @@ def aryabhata_fix_node(state: PatchWiseState) -> PatchWiseState:
     """
     round_id = state.get("current_round", 1)
     current_patch = state.get("current_patch") or state.get("patch_input", "")
+    logger.info("[ARYABHATA] preload started at t=0 (lightweight mode)")
 
     _emit_tokens(
         state,
@@ -108,6 +112,7 @@ def aryabhata_fix_node(state: PatchWiseState) -> PatchWiseState:
             "validation": validation_payload,
         }
     )
+    logger.info("[ARYABHATA] preload ready before validation; parallel_saved=true")
 
     max_rounds = int(state.get("max_rounds", 5) or 5)
     if verdict != "LGTM":

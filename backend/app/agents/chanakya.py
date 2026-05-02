@@ -12,6 +12,7 @@ from app.skills.patchwise_skill import full_patch_analysis
 from app.skills.search_skill import SearchSkill
 from core.llm_factory import get_llm
 from core.patchwise_skill import PatchWiseResult, PatchWiseSkill
+from core.ssh_pool import ssh_pool
 from agents.version_intelligence import fetch_version_history
 from agents.aryabhata_fix_engine import AryabhataFixEngine
 from agents.cover_letter_generator import generate_cover_letter_if_missing
@@ -658,6 +659,11 @@ async def chanakya_review_node(state: PatchWiseState) -> PatchWiseState:
     skill, skill_error = _get_patchwise_skill()
     if skill:
         try:
+            logger.info(
+                "Running patchwise on dev-compute path=%s mode=%s",
+                ssh_pool.kernel_path,
+                ssh_pool.mode.value,
+            )
             if source_context and not os.path.isdir(source_context):
                 _emit(
                     state,

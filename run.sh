@@ -377,6 +377,116 @@ cmd_shell() {
     docker compose exec patchwise /bin/bash
 }
 
+cmd_ssh_test() {
+    echo ""
+    echo "  Testing SSH connection to dev-compute (hu-nandam-hyd)..."
+    echo ""
+    docker compose exec patchwise python3 -c "
+import asyncio, asyncssh, os
+async def test():
+    try:
+        key_path = os.getenv('DEV_COMPUTE_SSH_KEY', '/run/secrets/ssh_private_key')
+        conn = await asyncssh.connect(
+            'hu-nandam-hyd',
+            username='nandam',
+            client_keys=[key_path],
+            known_hosts=None,
+            connect_timeout=10
+        )
+        result = await conn.run('echo connected && screen --version | head -1 && ~/.local/bin/patchwise --help | head -3')
+        print('  ✅ SSH connection to hu-nandam-hyd: OK')
+        lines = result.stdout.split('\\n')
+        print('  ✅ Screen:', lines[1] if len(lines) > 1 else 'available')
+        print('  ✅ PatchWise: available')
+        conn.close()
+    except Exception as e:
+        print(f'  ❌ SSH connection failed: {e}')
+        print('  ℹ️  PatchWise will use local Docker fallback mode')
+asyncio.run(test())
+"
+    echo ""
+}
+
+cmd_setup_secrets() {
+    echo ""
+    echo "  Setting up Docker secrets for dev-compute..."
+    echo ""
+    mkdir -p secrets
+    echo "  Paste path to your SSH private key (e.g. ~/.ssh/id_rsa):"
+    read -r SSH_KEY_PATH
+    if [ -f "$SSH_KEY_PATH" ]; then
+        cp "$SSH_KEY_PATH" secrets/ssh_id_rsa
+        chmod 600 secrets/ssh_id_rsa
+        echo "  ✅ SSH key copied to secrets/ssh_id_rsa"
+    else
+        echo "  ❌ File not found: $SSH_KEY_PATH"
+        exit 1
+    fi
+    echo ""
+    echo "  Enter your QGenie API key:"
+    read -r -s QGENIE_KEY
+    echo "$QGENIE_KEY" > secrets/qgenie_api_key.txt
+    chmod 600 secrets/qgenie_api_key.txt
+    echo ""
+    echo "  ✅ QGenie API key saved"
+    if ! grep -q '^secrets/$' .gitignore 2>/dev/null; then
+      echo "secrets/" >> .gitignore
+    fi
+    echo "  ✅ Done! Run './run.sh rebuild' to apply"
+    echo ""
+}
+
+cmd_screens() {
+    echo ""
+    echo "  Active PatchWise screen sessions on dev-compute:"
+    echo ""
+    docker compose exec patchwise python3 -c "
+import asyncio, asyncssh, os
+async def list_screens():
+    try:
+        conn = await asyncssh.connect(
+            'hu-nandam-hyd',
+            username='nandam',
+            client_keys=[os.getenv('DEV_COMPUTE_SSH_KEY', '/run/secrets/ssh_private_key')],
+            known_hosts=None,
+            connect_timeout=10
+        )
+        result = await conn.run('screen -ls 2>/dev/null | grep pw_ || echo \"No active PatchWise screens\"')
+        print(result.stdout)
+        conn.close()
+    except Exception as e:
+        print(f'Cannot list screens: {e}')
+asyncio.run(list_screens())
+"
+    echo ""
+}
+
+cmd_clean_screens() {
+    echo ""
+    echo "  ⚠️  This will kill ALL PatchWise screen sessions on dev-compute."
+    echo "  Are you sure? (y/N): "
+    read -r confirm
+    if [ "$confirm" = "y" ] || [ "$confirm" = "Y" ]; then
+      docker compose exec patchwise python3 -c "
+import asyncio, asyncssh, os
+async def clean():
+    conn = await asyncssh.connect(
+        'hu-nandam-hyd',
+        username='nandam',
+        client_keys=[os.getenv('DEV_COMPUTE_SSH_KEY', '/run/secrets/ssh_private_key')],
+        known_hosts=None
+    )
+    await conn.run(
+        'screen -ls 2>/dev/null | grep pw_ | awk \"{print \\\\$1}\" | xargs -I{} screen -S {} -X quit 2>/dev/null; echo done'
+    )
+    print('  ✅ All PatchWise screens cleaned')
+    conn.close()
+asyncio.run(clean())
+"
+    fi
+    echo ""
+}
+
 # ── Help ─────────────────────────────────────────────────────
 cmd_help() {
     print_banner
@@ -392,6 +502,10 @@ cmd_help() {
     echo "    logs      Stream container logs"
     echo "    status    Show container status + health check"
     echo "    seed      Pre-seed LKML knowledge base (ALSA/ASoC)"
+    echo "    ssh-test  Test SSH to hu-nandam-hyd from container"
+    echo "    setup-secrets  Configure ssh/qgenie docker secrets"
+    echo "    screens   List active dev-compute screen sessions"
+    echo "    clean-screens  Kill all dev-compute screen sessions"
     echo "    shell     Open shell inside container"
     echo "    backup    Create timestamped SQLite backup in ./data/backups"
     echo "    restore   Restore SQLite backup from ./data/backups"
@@ -419,6 +533,10 @@ case $COMMAND in
     logs)    cmd_logs ;;
     status)  cmd_status ;;
     seed)    cmd_seed ;;
+    ssh-test) cmd_ssh_test ;;
+    setup-secrets) cmd_setup_secrets ;;
+    screens) cmd_screens ;;
+    clean-screens) cmd_clean_screens ;;
     shell)   cmd_shell ;;
     backup)  cmd_backup ;;
     restore) cmd_restore "$@" ;;

@@ -15,6 +15,7 @@ import {
   FileUp,
   Shield,
 } from "lucide-react";
+import { DevComputeHealthCard } from "../components/DevComputeHealthCard";
 
 const StatusBadge = ({ status }) => {
   const cfg = {
@@ -312,6 +313,8 @@ export default function SystemHealthDashboard() {
           <RefreshCw size={14} /> Refresh
         </button>
       </div>
+
+      <DevComputeHealthCard />
 
       <div style={{ display: "flex", gap: 10, marginBottom: 18 }}>
         <button
