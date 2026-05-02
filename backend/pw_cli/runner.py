@@ -2,14 +2,13 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
 from dataclasses import dataclass
 from typing import Any
 
 from app.agents.aryabhata import aryabhata_fix_node_async
 from app.agents.chanakya import chanakya_review_node
-from core.input_processor import process_input
-from pw_cli.protocol import A2AEnvelope
+from pw_cli.input_adapter import InputBundle, resolve_input_bundle
+from pw_cli.protocol import A2AEnvelope, MessageType
 from pw_cli.store import CLISessionStore
 
 
@@ -34,48 +33,17 @@ def _safe_state(state: dict[str, Any]) -> dict[str, Any]:
     return json.loads(json.dumps(sanitized, ensure_ascii=False, default=str))
 
 
-def _collect_patch_from_path(path: str) -> str:
-    if os.path.isfile(path):
-        with open(path, "r", encoding="utf-8", errors="replace") as handle:
-            return handle.read()
-    if os.path.isdir(path):
-        chunks: list[str] = []
-        files = sorted(
-            [
-                os.path.join(path, name)
-                for name in os.listdir(path)
-                if name.endswith((".patch", ".diff", ".txt"))
-            ]
-        )
-        for file_path in files:
-            with open(file_path, "r", encoding="utf-8", errors="replace") as handle:
-                chunks.append(handle.read())
-        return "\n\n".join(chunks)
-    return path
-
-
-async def _resolve_input(input_value: str, input_type: str) -> tuple[str, str]:
-    if input_type == "file":
-        content = _collect_patch_from_path(input_value)
-        return ("file", content)
-    if input_type == "raw":
-        return ("raw", input_value)
-    detected, normalized = await process_input(input_value)
-    lowered = str(detected).lower()
-    if lowered == "file":
-        normalized = _collect_patch_from_path(normalized)
-    return (lowered, normalized)
-
-
 def _initial_state(
     session_id: str,
     patch_text: str,
     subsystem: str,
     source_path: str,
+    input_bundle: InputBundle,
     llm_provider: str,
     llm_model: str,
     max_rounds: int,
 ) -> dict[str, Any]:
+    lore_url = input_bundle.input_ref if input_bundle.input_type == "lore_url" else ""
     return {
         "session_id": session_id,
         "patch_input": patch_text,
@@ -101,6 +69,11 @@ def _initial_state(
         "touched_lines": [],
         "a2a_messages": [],
         "challenge_timeout": 60,
+        "input_type": input_bundle.input_type,
+        "input_url": lore_url,
+        "lore_url": lore_url,
+        "input_metadata": input_bundle.metadata,
+        "input_evidence": input_bundle.evidence,
         "shared_a2a_context": {
             "session_id": session_id,
             "original_patch": patch_text,
@@ -115,6 +88,8 @@ def _initial_state(
             "user_arbitration_pending": False,
             "lgtm": False,
             "challenge_timeout": 60,
+            "input_metadata": input_bundle.metadata,
+            "input_evidence": input_bundle.evidence,
         },
     }
 
@@ -152,19 +127,21 @@ async def run_new_session(
     llm_model: str,
     max_rounds: int,
 ) -> RunResult:
-    resolved_type, patch_text = await _resolve_input(input_value, input_type)
+    bundle = await resolve_input_bundle(input_value, input_type, subsystem=subsystem)
+    patch_text = bundle.patch_text
     bootstrap_state = _initial_state(
         session_id="bootstrap",
         patch_text=patch_text,
         subsystem=subsystem,
         source_path=source_path,
+        input_bundle=bundle,
         llm_provider=llm_provider,
         llm_model=llm_model,
         max_rounds=max_rounds,
     )
     session_id = store.create_session(
-        input_type=resolved_type,
-        input_ref=input_value[:400],
+        input_type=bundle.input_type,
+        input_ref=bundle.input_ref[:400],
         subsystem=subsystem or "audio",
         max_rounds=max_rounds,
         state_json=_safe_state(bootstrap_state),
@@ -174,6 +151,7 @@ async def run_new_session(
         patch_text=patch_text,
         subsystem=subsystem,
         source_path=source_path,
+        input_bundle=bundle,
         llm_provider=llm_provider,
         llm_model=llm_model,
         max_rounds=max_rounds,
@@ -188,6 +166,22 @@ async def run_existing_state(store: CLISessionStore, *, session_id: str, state: 
 
     state["_stream_callback"] = _stream_callback
     max_rounds = int(state.get("max_rounds", 5) or 5)
+    initial_evidence = state.get("input_evidence") if isinstance(state.get("input_evidence"), list) else []
+    if initial_evidence:
+        store.append_message(
+            A2AEnvelope(
+                session_id=session_id,
+                round_num=0,
+                sender="system",
+                receiver="chanakya",
+                message_type=MessageType.STATUS,
+                content="Input evidence loaded for autonomous A2A session",
+                evidence={"input_evidence": initial_evidence, "input_metadata": state.get("input_metadata", {})},
+                confidence_score=1.0,
+                source="input_adapter",
+                task_type="input_context",
+            )
+        )
 
     while True:
         round_before = int(state.get("current_round", 1) or 1)
@@ -215,6 +209,16 @@ async def run_existing_state(store: CLISessionStore, *, session_id: str, state: 
             break
 
         state = await aryabhata_fix_node_async(state)
+        validation = state.get("aryabhata_validation") if isinstance(state.get("aryabhata_validation"), dict) else {}
+        blockers = validation.get("blockers") if isinstance(validation.get("blockers"), list) else []
+        confidence = int(validation.get("confidence", 0) or 0)
+        if blockers and confidence >= 85:
+            state["verdict"] = "BLOCKED"
+            state["hard_block_reason"] = {
+                "reason": "strong_evidence_block",
+                "confidence": confidence,
+                "blocker_count": len(blockers),
+            }
         a_summary = _aryabhata_summary(state)
         store.append_round(
             session_id=session_id,
@@ -233,6 +237,8 @@ async def run_existing_state(store: CLISessionStore, *, session_id: str, state: 
 
         if state.get("verdict") == "LGTM":
             break
+        if state.get("verdict") == "BLOCKED":
+            break
         if round_before >= max_rounds:
             break
         next_round = int(state.get("current_round", round_before) or round_before)
@@ -247,6 +253,12 @@ async def run_existing_state(store: CLISessionStore, *, session_id: str, state: 
         "review_rounds": len(state.get("review_findings") or []),
         "fix_rounds": len(state.get("fix_attempts") or []),
         "quality_score": state.get("quality_score", 0.0),
+        "input_type": state.get("input_type", "raw"),
+        "input_history_found": bool(
+            ((state.get("input_metadata") or {}).get("history") or {}).get("found")
+            if isinstance(state.get("input_metadata"), dict)
+            else False
+        ),
     }
     store.update_session(
         session_id,
@@ -288,4 +300,3 @@ def resume_session_sync(store: CLISessionStore, session_id: str) -> RunResult:
             summary=session.summary,
         )
     return asyncio.run(run_existing_state(store, session_id=session_id, state=state))
-

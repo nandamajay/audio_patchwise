@@ -194,6 +194,8 @@ NOTIFICATION_EMAIL=nandam@qti.qualcomm.com
 ```bash
 # Start autonomous A2A review from patch text/path/url
 ./run.sh cli run --input /path/to/0001.patch --input-type file --subsystem audio
+./run.sh cli run --input https://lore.kernel.org/all/<message-id>/ --subsystem audio
+./run.sh cli run --input https://github.com/<owner>/<repo>/pull/<id> --subsystem audio
 
 # Inspect session progress and output
 ./run.sh cli history --limit 5
@@ -201,6 +203,9 @@ NOTIFICATION_EMAIL=nandam@qti.qualcomm.com
 ./run.sh cli show --session <session_id>
 ./run.sh cli resume --session <session_id>
 ```
+Notes:
+- Lore inputs automatically fetch `/raw` patch text and attach version-history evidence when available.
+- GitHub PR inputs fetch both `.patch` content and PR review metadata.
 
 ### API Key Setup (Safer Flow)
 - `./run.sh start` now prompts for API key if provider is `openai`/`anthropic`/`qualcomm` and no key is found.
