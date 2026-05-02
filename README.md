@@ -185,8 +185,21 @@ NOTIFICATION_EMAIL=nandam@qti.qualcomm.com
 ./run.sh rebuild     # Force rebuild (after .env changes)
 ./run.sh logs        # Tail all logs
 ./run.sh status      # Show container status
+./run.sh cli ...     # Run CLI-first A2A flow
 ./run.sh seed        # Pre-seed LKML knowledge base
 ./run.sh clean       # Remove containers + volumes
+```
+
+### CLI-First Mode (Phase 1)
+```bash
+# Start autonomous A2A review from patch text/path/url
+./run.sh cli run --input /path/to/0001.patch --input-type file --subsystem audio
+
+# Inspect session progress and output
+./run.sh cli history --limit 5
+./run.sh cli status --session <session_id>
+./run.sh cli show --session <session_id>
+./run.sh cli resume --session <session_id>
 ```
 
 ### API Key Setup (Safer Flow)

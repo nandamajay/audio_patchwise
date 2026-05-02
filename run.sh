@@ -322,6 +322,17 @@ cmd_status() {
     curl -s "http://localhost:$port/api/health" | python3 -m json.tool 2>/dev/null || echo "   (Container may still be starting up)"
 }
 
+cmd_cli() {
+    setup_env
+    local db_path="${SQLITE_PATH:-${SQLITE_DB_PATH:-./data/sqlite/patchwise.db}}"
+    local cli_python="python3"
+    if [ -x "./backend/.venv/bin/python" ]; then
+        cli_python="./backend/.venv/bin/python"
+    fi
+    echo ">> Running PatchWise CLI (db: ${db_path})"
+    ${cli_python} backend/patchwise_cli.py --db-path "${db_path}" "${@:2}"
+}
+
 cmd_clean() {
     echo "⚠️  WARNING: This will remove all containers AND volumes (data will be lost)!"
     read -p "   Are you sure? (yes/no): " confirm
@@ -501,6 +512,7 @@ cmd_help() {
     echo "    rebuild-clean        Full rebuild from scratch (slow)"
     echo "    logs      Stream container logs"
     echo "    status    Show container status + health check"
+    echo "    cli       Run CLI-first A2A flow (run/status/show/history/resume)"
     echo "    seed      Pre-seed LKML knowledge base (ALSA/ASoC)"
     echo "    ssh-test  Test SSH to hu-nandam-hyd from container"
     echo "    setup-secrets  Configure ssh/qgenie docker secrets"
@@ -517,6 +529,7 @@ cmd_help() {
     echo "    ./run.sh               # Start (default)"
     echo "    ./run.sh rebuild       # After .env changes"
     echo "    ./run.sh logs          # Debug startup issues"
+    echo "    ./run.sh cli run --input /path/to/0001.patch --input-type file"
     echo "    ./run.sh seed          # Pre-seed KB before first use"
     echo ""
 }
@@ -532,6 +545,7 @@ case $COMMAND in
     rebuild-clean) cmd_rebuild_clean ;;
     logs)    cmd_logs ;;
     status)  cmd_status ;;
+    cli)     cmd_cli "$@" ;;
     seed)    cmd_seed ;;
     ssh-test) cmd_ssh_test ;;
     setup-secrets) cmd_setup_secrets ;;
