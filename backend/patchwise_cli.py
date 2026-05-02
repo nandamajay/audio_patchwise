@@ -56,21 +56,69 @@ def _progress_line(event: dict[str, Any]) -> str | None:
         mr = event.get("max_rounds")
         return f"[progress] session={sid} started (max_rounds={mr})"
     if kind == "phase":
-        return f"[progress] round={event.get('round')} phase={event.get('phase')} started"
+        phase = str(event.get("phase") or "")
+        hint = " (tool execution may take a few minutes)" if phase in {"chanakya", "aryabhata"} else ""
+        return f"[progress] round={event.get('round')} phase={phase} started{hint}"
     if kind == "phase_complete":
-        verdict = event.get("verdict")
-        return f"[progress] round={event.get('round')} phase={event.get('phase')} done verdict={verdict}"
+        verdict = str(event.get("verdict") or "-")
+        phase = str(event.get("phase") or "")
+        summary = event.get("summary") if isinstance(event.get("summary"), dict) else {}
+        if phase == "chanakya":
+            issues = summary.get("issues", "?")
+            quality = summary.get("quality_score", "?")
+            src = summary.get("source", "?")
+            conf = summary.get("confidence", "?")
+            return (
+                f"[progress] round={event.get('round')} phase=chanakya done "
+                f"issues={issues} quality={quality} source={src} confidence={conf} verdict={verdict}"
+            )
+        if phase == "aryabhata":
+            blockers = summary.get("blockers", "?")
+            conf = summary.get("confidence", "?")
+            src = summary.get("source", "?")
+            return (
+                f"[progress] round={event.get('round')} phase=aryabhata done "
+                f"blockers={blockers} confidence={conf} source={src} verdict={verdict}"
+            )
+        return f"[progress] round={event.get('round')} phase={phase} done verdict={verdict}"
     if kind == "status":
+        status = str(event.get("status") or "-")
+        verdict = str(event.get("verdict", "-"))
+        if status == "completed":
+            return f"[progress] status=completed round={event.get('round')} final_verdict={verdict}"
+        if status == "waiting_user":
+            return f"[progress] status=waiting_user round={event.get('round')} verdict={verdict} action_required=clarify_or_override"
         return (
-            f"[progress] status={event.get('status')} round={event.get('round')} "
-            f"verdict={event.get('verdict', '-')}"
+            f"[progress] status={status} round={event.get('round')} "
+            f"verdict={verdict}"
         )
     if kind == "stream":
         msg_type = str(event.get("message_type") or "")
         agent = str(event.get("agent") or "")
         round_num = event.get("round")
         src = event.get("source")
-        if msg_type in {"analysis_source", "lore_intelligence", "aryabhata_validation", "fix_complete"}:
+        metadata = event.get("metadata") if isinstance(event.get("metadata"), dict) else {}
+        if msg_type == "fix_complete":
+            content = str(event.get("content") or "")
+            has_cover = "<<<COVER_LETTER_START>>>" in content
+            has_patch = "<<<FIXED_PATCH_START>>>" in content
+            return (
+                f"[progress] round={round_num} {agent}:fix_complete src={src} "
+                f"fixed_patch={'yes' if has_patch else 'no'} cover_letter={'yes' if has_cover else 'no'}"
+            )
+        if msg_type == "aryabhata_validation":
+            issue_count = metadata.get("issue_count", "?")
+            confidence = metadata.get("confidence", "?")
+            blockers = metadata.get("blockers")
+            blocker_count = len(blockers) if isinstance(blockers, list) else "?"
+            snippet = str(event.get("content") or "").strip().replace("\n", " ")
+            if len(snippet) > 100:
+                snippet = snippet[:100] + "..."
+            return (
+                f"[progress] round={round_num} {agent}:validation src={src} "
+                f"issues={issue_count} blockers={blocker_count} confidence={confidence} note=\"{snippet}\""
+            )
+        if msg_type in {"analysis_source", "lore_intelligence"}:
             snippet = str(event.get("content") or "").strip().replace("\n", " ")
             if len(snippet) > 110:
                 snippet = snippet[:110] + "..."
@@ -86,9 +134,13 @@ def cmd_run(args: argparse.Namespace) -> int:
     )
     run_state: dict[str, Any] = {
         "session_id": None,
+        "max_rounds": args.max_rounds,
         "last_line": "",
         "last_stream_key": None,
         "last_print_monotonic": 0.0,
+        "last_event_monotonic": time.monotonic(),
+        "active_phase": None,
+        "active_round": None,
     }
     stop_event = threading.Event()
     poll_store = CLISessionStore(db_path=args.db_path)
@@ -117,6 +169,14 @@ def cmd_run(args: argparse.Namespace) -> int:
                 session.updated_at,
             )
             if snapshot == last_snapshot:
+                active_phase = run_state.get("active_phase") or "unknown"
+                active_round = run_state.get("active_round") or session.current_round
+                silent_for = int(max(0.0, time.monotonic() - float(run_state.get("last_event_monotonic") or 0.0)))
+                print(
+                    f"[heartbeat] still running round={active_round}/{session.max_rounds} "
+                    f"phase={active_phase} silent_for={silent_for}s",
+                    flush=True,
+                )
                 continue
             last_snapshot = snapshot
             print(
@@ -134,6 +194,15 @@ def cmd_run(args: argparse.Namespace) -> int:
             return
         if event.get("session_id") and not run_state.get("session_id"):
             run_state["session_id"] = event.get("session_id")
+        if event.get("max_rounds"):
+            run_state["max_rounds"] = int(event.get("max_rounds") or run_state.get("max_rounds") or 1)
+        run_state["last_event_monotonic"] = time.monotonic()
+        if event.get("type") == "phase":
+            run_state["active_phase"] = event.get("phase")
+            run_state["active_round"] = event.get("round")
+        elif event.get("type") == "phase_complete":
+            run_state["active_phase"] = None
+            run_state["active_round"] = event.get("round")
 
         line = _progress_line(event)
         if not line:
@@ -152,6 +221,17 @@ def cmd_run(args: argparse.Namespace) -> int:
         run_state["last_line"] = line
         run_state["last_print_monotonic"] = now
         print(line, flush=True)
+
+        if event.get("type") == "phase_complete" and str(event.get("phase")) == "aryabhata":
+            verdict = str(event.get("verdict") or "")
+            round_num = int(event.get("round") or 0)
+            max_rounds = int(run_state.get("max_rounds") or args.max_rounds or 1)
+            if verdict == "NEEDS_WORK" and round_num < max_rounds:
+                print(
+                    f"[progress] next_step=chanakya_retry upcoming_round={round_num + 1} "
+                    f"(ARYABHATA requested additional fixes)",
+                    flush=True,
+                )
 
     try:
         result = run_new_session_sync(

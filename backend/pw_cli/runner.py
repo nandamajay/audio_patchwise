@@ -390,6 +390,7 @@ async def run_existing_state(
     def _stream_callback(payload: dict[str, Any]) -> None:
         envelope = A2AEnvelope.from_agent_payload(session_id, payload)
         store.append_message(envelope)
+        metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
         _emit_progress(
             progress_callback,
             {
@@ -401,6 +402,12 @@ async def run_existing_state(
                 "task_type": payload.get("task_type"),
                 "source": payload.get("source"),
                 "content": str(payload.get("content", "") or "")[:220],
+                "metadata": {
+                    "issue_count": metadata.get("issue_count"),
+                    "confidence": metadata.get("confidence"),
+                    "blockers": metadata.get("blockers"),
+                    "validation_passed": payload.get("validation_passed"),
+                },
                 "timestamp": _utc_now(),
             },
         )
