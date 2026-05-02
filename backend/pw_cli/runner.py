@@ -166,6 +166,12 @@ async def run_existing_state(store: CLISessionStore, *, session_id: str, state: 
 
     state["_stream_callback"] = _stream_callback
     max_rounds = int(state.get("max_rounds", 5) or 5)
+    subsystem = str(state.get("subsystem", "audio") or "audio")
+    kb_patterns = store.get_active_kb_patterns(subsystem=subsystem, limit=12)
+    state["kb_active_patterns"] = kb_patterns
+    shared = state.get("shared_a2a_context") if isinstance(state.get("shared_a2a_context"), dict) else {}
+    shared["kb_active_patterns"] = kb_patterns
+    state["shared_a2a_context"] = shared
     initial_evidence = state.get("input_evidence") if isinstance(state.get("input_evidence"), list) else []
     if initial_evidence:
         store.append_message(
@@ -176,7 +182,11 @@ async def run_existing_state(store: CLISessionStore, *, session_id: str, state: 
                 receiver="chanakya",
                 message_type=MessageType.STATUS,
                 content="Input evidence loaded for autonomous A2A session",
-                evidence={"input_evidence": initial_evidence, "input_metadata": state.get("input_metadata", {})},
+                evidence={
+                    "input_evidence": initial_evidence,
+                    "input_metadata": state.get("input_metadata", {}),
+                    "kb_active_patterns": kb_patterns,
+                },
                 confidence_score=1.0,
                 source="input_adapter",
                 task_type="input_context",
@@ -248,6 +258,7 @@ async def run_existing_state(store: CLISessionStore, *, session_id: str, state: 
     if state.get("verdict") == "PENDING":
         state["verdict"] = "NEEDS_WORK"
 
+    learning = store.learn_from_session(session_id, _safe_state(state), subsystem=subsystem)
     summary = {
         "conversation_entries": len(state.get("conversation_log") or []),
         "review_rounds": len(state.get("review_findings") or []),
@@ -259,6 +270,8 @@ async def run_existing_state(store: CLISessionStore, *, session_id: str, state: 
             if isinstance(state.get("input_metadata"), dict)
             else False
         ),
+        "kb_active_patterns": len(kb_patterns),
+        "kb_learning": learning,
     }
     store.update_session(
         session_id,

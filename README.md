@@ -202,10 +202,13 @@ NOTIFICATION_EMAIL=nandam@qti.qualcomm.com
 ./run.sh cli status --session <session_id>
 ./run.sh cli show --session <session_id>
 ./run.sh cli resume --session <session_id>
+./run.sh cli kb stats
+./run.sh cli kb audit --subsystem audio --limit 20
 ```
 Notes:
 - Lore inputs automatically fetch `/raw` patch text and attach version-history evidence when available.
 - GitHub PR inputs fetch both `.patch` content and PR review metadata.
+- Phase 3 learning stores global + subsystem patterns with guarded auto-promotion.
 
 ### API Key Setup (Safer Flow)
 - `./run.sh start` now prompts for API key if provider is `openai`/`anthropic`/`qualcomm` and no key is found.

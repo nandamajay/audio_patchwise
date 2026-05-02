@@ -122,6 +122,28 @@ def cmd_resume(args: argparse.Namespace) -> int:
     return 2
 
 
+def cmd_kb(args: argparse.Namespace) -> int:
+    store = CLISessionStore(db_path=args.db_path)
+    action = args.action
+    if action == "stats":
+        _print_json({"kb": store.kb_stats()})
+        return 0
+    if action == "audit":
+        patterns = store.list_kb_patterns(subsystem=args.subsystem, limit=args.limit)
+        _print_json({"patterns": patterns})
+        return 0
+    if action == "promote":
+        ok = store.set_pattern_state(args.pattern_key, "promoted")
+        _print_json({"pattern_key": args.pattern_key, "state": "promoted", "updated": bool(ok)})
+        return 0 if ok else 1
+    if action == "rollback":
+        ok = store.set_pattern_state(args.pattern_key, "deprecated")
+        _print_json({"pattern_key": args.pattern_key, "state": "deprecated", "updated": bool(ok)})
+        return 0 if ok else 1
+    print(f"Unsupported kb action: {action}", file=sys.stderr)
+    return 1
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="PatchWise CLI-first A2A runner")
     parser.add_argument(
@@ -168,6 +190,21 @@ def build_parser() -> argparse.ArgumentParser:
     resume = sub.add_parser("resume", help="Resume an existing CLI session")
     resume.add_argument("--session", required=True, help="Session ID")
     resume.set_defaults(func=cmd_resume)
+
+    kb = sub.add_parser("kb", help="Knowledge-base commands (phase 3)")
+    kb_sub = kb.add_subparsers(dest="action", required=True)
+    kb_stats = kb_sub.add_parser("stats", help="Show KB stats")
+    kb_stats.set_defaults(func=cmd_kb)
+    kb_audit = kb_sub.add_parser("audit", help="List KB patterns")
+    kb_audit.add_argument("--subsystem", default=None, help="Optional subsystem filter")
+    kb_audit.add_argument("--limit", type=int, default=50, help="Maximum patterns")
+    kb_audit.set_defaults(func=cmd_kb)
+    kb_promote = kb_sub.add_parser("promote", help="Force-promote a pattern")
+    kb_promote.add_argument("--pattern-key", required=True, help="Pattern key")
+    kb_promote.set_defaults(func=cmd_kb)
+    kb_rollback = kb_sub.add_parser("rollback", help="Deprecate a pattern")
+    kb_rollback.add_argument("--pattern-key", required=True, help="Pattern key")
+    kb_rollback.set_defaults(func=cmd_kb)
     return parser
 
 
