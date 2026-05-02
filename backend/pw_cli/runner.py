@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
+import os
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any
 
 from app.agents.aryabhata import aryabhata_fix_node_async
@@ -22,6 +25,22 @@ class RunResult:
     summary: dict[str, Any]
 
 
+def _utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _bool_env(name: str, default: bool = False) -> bool:
+    raw = str(os.getenv(name, str(default))).strip().lower()
+    return raw in {"1", "true", "yes", "on"}
+
+
+def _int_env(name: str, default: int) -> int:
+    try:
+        return int(os.getenv(name, str(default)).strip() or default)
+    except Exception:
+        return int(default)
+
+
 def _safe_state(state: dict[str, Any]) -> dict[str, Any]:
     sanitized: dict[str, Any] = {}
     for key, value in state.items():
@@ -31,6 +50,154 @@ def _safe_state(state: dict[str, Any]) -> dict[str, Any]:
             continue
         sanitized[key] = value
     return json.loads(json.dumps(sanitized, ensure_ascii=False, default=str))
+
+
+def _truncate_value(value: Any, *, depth: int = 0, max_depth: int = 5, max_str: int = 1200, max_list: int = 25) -> Any:
+    if depth >= max_depth:
+        return "<truncated>"
+    if value is None or isinstance(value, (int, float, bool)):
+        return value
+    if isinstance(value, str):
+        if len(value) <= max_str:
+            return value
+        trimmed = len(value) - max_str
+        return f"{value[:max_str]} ...<trimmed {trimmed} chars>"
+    if isinstance(value, list):
+        clipped = [_truncate_value(item, depth=depth + 1, max_depth=max_depth, max_str=max_str, max_list=max_list) for item in value[:max_list]]
+        if len(value) > max_list:
+            clipped.append(f"<trimmed {len(value) - max_list} items>")
+        return clipped
+    if isinstance(value, dict):
+        output: dict[str, Any] = {}
+        for idx, (k, v) in enumerate(value.items()):
+            if idx >= 60:
+                output["__trimmed_keys__"] = len(value) - 60
+                break
+            output[str(k)] = _truncate_value(v, depth=depth + 1, max_depth=max_depth, max_str=max_str, max_list=max_list)
+        return output
+    return str(value)
+
+
+def _compact_round_state(state: dict[str, Any]) -> dict[str, Any]:
+    safe = _safe_state(state)
+    patch_input = str(safe.pop("patch_input", "") or "")
+    current_patch = str(safe.pop("current_patch", "") or "")
+    current_fixed_patch = str(safe.pop("current_fixed_patch", "") or "")
+    conversation_log = safe.pop("conversation_log", [])
+    review_findings = safe.get("review_findings")
+    fix_attempts = safe.get("fix_attempts")
+    similar_patches = safe.get("similar_patches")
+
+    if isinstance(safe.get("latest_review"), dict):
+        latest = safe.get("latest_review", {})
+        issues = latest.get("issues") if isinstance(latest.get("issues"), list) else []
+        safe["latest_review"] = {
+            "round": latest.get("round"),
+            "summary": latest.get("summary"),
+            "issue_count": len(issues),
+            "quality_score": latest.get("quality_score"),
+            "analysis_mode": latest.get("analysis_mode"),
+            "patchwise": latest.get("patchwise"),
+        }
+
+    safe["snapshot_meta"] = {
+        "compact": True,
+        "patch_input_len": len(patch_input),
+        "current_patch_len": len(current_patch),
+        "current_fixed_patch_len": len(current_fixed_patch),
+        "patch_input_sha": hashlib.sha1(patch_input.encode("utf-8", errors="ignore")).hexdigest()[:12] if patch_input else "",
+        "current_patch_sha": hashlib.sha1(current_patch.encode("utf-8", errors="ignore")).hexdigest()[:12] if current_patch else "",
+        "current_fixed_patch_sha": hashlib.sha1(current_fixed_patch.encode("utf-8", errors="ignore")).hexdigest()[:12] if current_fixed_patch else "",
+        "conversation_entries": len(conversation_log) if isinstance(conversation_log, list) else 0,
+        "review_rounds": len(review_findings) if isinstance(review_findings, list) else 0,
+        "fix_rounds": len(fix_attempts) if isinstance(fix_attempts, list) else 0,
+        "similar_refs": len(similar_patches) if isinstance(similar_patches, list) else 0,
+    }
+    safe["conversation_log_count"] = len(conversation_log) if isinstance(conversation_log, list) else 0
+    safe["compact_snapshot"] = True
+
+    max_str = max(300, _int_env("PW_CLI_ROUND_SNAPSHOT_MAX_STR", 1200))
+    max_list = max(5, _int_env("PW_CLI_ROUND_SNAPSHOT_MAX_LIST", 25))
+    return _truncate_value(safe, max_str=max_str, max_list=max_list)
+
+
+def _round_state_snapshot(state: dict[str, Any]) -> dict[str, Any]:
+    if _bool_env("PW_CLI_FULL_ROUND_STATE", False):
+        return _safe_state(state)
+    return _compact_round_state(state)
+
+
+def _ensure_shared_context(state: dict[str, Any]) -> dict[str, Any]:
+    shared = state.get("shared_a2a_context")
+    if not isinstance(shared, dict):
+        shared = {}
+    state["shared_a2a_context"] = shared
+    return shared
+
+
+def _is_waiting_for_user(state: dict[str, Any]) -> bool:
+    shared = _ensure_shared_context(state)
+    if bool(shared.get("user_arbitration_pending")):
+        return True
+    return str(state.get("verdict", "")).upper() == "BLOCKED"
+
+
+def _build_waiting_payload(state: dict[str, Any], round_num: int) -> dict[str, Any]:
+    validation = state.get("aryabhata_validation") if isinstance(state.get("aryabhata_validation"), dict) else {}
+    blockers = validation.get("blockers") if isinstance(validation.get("blockers"), list) else []
+    confidence = int(validation.get("confidence", 0) or 0)
+    hard_reason = state.get("hard_block_reason") if isinstance(state.get("hard_block_reason"), dict) else {}
+    reason = str(hard_reason.get("reason") or "arbitration_required")
+    if not blockers:
+        blockers = ["ARYABHATA requested user clarification before continuing."]
+    question = (
+        "ARYABHATA raised strong evidence blockers. "
+        "Provide clarification or run override to force a decision."
+    )
+    return {
+        "round": int(round_num),
+        "reason": reason,
+        "confidence": confidence,
+        "blockers": blockers[:12],
+        "question": question,
+    }
+
+
+def _waiting_summary(state: dict[str, Any], waiting_payload: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "phase": "user_arbitration",
+        "reason": waiting_payload.get("reason", "arbitration_required"),
+        "question": waiting_payload.get("question", ""),
+        "blocker_count": len(waiting_payload.get("blockers") or []),
+        "confidence": waiting_payload.get("confidence", 0),
+        "current_round": int(state.get("current_round", 1) or 1),
+    }
+
+
+def _final_summary(state: dict[str, Any], kb_patterns: list[dict[str, Any]], learning: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "conversation_entries": len(state.get("conversation_log") or []),
+        "review_rounds": len(state.get("review_findings") or []),
+        "fix_rounds": len(state.get("fix_attempts") or []),
+        "quality_score": state.get("quality_score", 0.0),
+        "input_type": state.get("input_type", "raw"),
+        "input_history_found": bool(
+            ((state.get("input_metadata") or {}).get("history") or {}).get("found")
+            if isinstance(state.get("input_metadata"), dict)
+            else False
+        ),
+        "kb_active_patterns": len(kb_patterns),
+        "kb_learning": learning,
+    }
+
+
+def _user_response_message_type(mode: str) -> MessageType:
+    mode = str(mode or "").lower()
+    if mode in {"clarify", "respond"}:
+        return MessageType.CLARIFICATION_RESPONSE
+    if mode == "override":
+        return MessageType.APPROVE
+    return MessageType.RESPONSE
 
 
 def _initial_state(
@@ -169,7 +336,7 @@ async def run_existing_state(store: CLISessionStore, *, session_id: str, state: 
     subsystem = str(state.get("subsystem", "audio") or "audio")
     kb_patterns = store.get_active_kb_patterns(subsystem=subsystem, limit=12)
     state["kb_active_patterns"] = kb_patterns
-    shared = state.get("shared_a2a_context") if isinstance(state.get("shared_a2a_context"), dict) else {}
+    shared = _ensure_shared_context(state)
     shared["kb_active_patterns"] = kb_patterns
     state["shared_a2a_context"] = shared
     initial_evidence = state.get("input_evidence") if isinstance(state.get("input_evidence"), list) else []
@@ -205,7 +372,7 @@ async def run_existing_state(store: CLISessionStore, *, session_id: str, state: 
             round_num=round_before,
             phase="chanakya",
             summary=c_summary,
-            state_json=_safe_state(state),
+            state_json=_round_state_snapshot(state),
         )
         store.update_session(
             session_id,
@@ -214,6 +381,44 @@ async def run_existing_state(store: CLISessionStore, *, session_id: str, state: 
             summary={"phase": "chanakya", **c_summary},
             state_json=_safe_state(state),
         )
+
+        if _is_waiting_for_user(state):
+            waiting_payload = _build_waiting_payload(state, round_before)
+            state["pending_user_action"] = waiting_payload
+            shared = _ensure_shared_context(state)
+            shared["user_arbitration_pending"] = True
+            shared["pending_user_action"] = waiting_payload
+            store.append_message(
+                A2AEnvelope(
+                    session_id=session_id,
+                    round_num=round_before,
+                    sender="chanakya",
+                    receiver="user",
+                    message_type=MessageType.CLARIFICATION_REQUEST,
+                    content=str(waiting_payload.get("question", "")),
+                    evidence={"waiting": waiting_payload},
+                    confidence_score=float(waiting_payload.get("confidence", 0) or 0) / 100.0,
+                    source="cli_runner",
+                    task_type="arbitration",
+                )
+            )
+            summary = _waiting_summary(state, waiting_payload)
+            store.update_session(
+                session_id,
+                status="waiting_user",
+                current_round=int(state.get("current_round", round_before)),
+                verdict=str(state.get("verdict", "BLOCKED")),
+                summary=summary,
+                state_json=_safe_state(state),
+            )
+            return RunResult(
+                session_id=session_id,
+                status="waiting_user",
+                verdict=str(state.get("verdict", "BLOCKED")),
+                current_round=int(state.get("current_round", round_before)),
+                max_rounds=int(state.get("max_rounds", 5) or 5),
+                summary=summary,
+            )
 
         if state.get("verdict") == "LGTM":
             break
@@ -229,13 +434,15 @@ async def run_existing_state(store: CLISessionStore, *, session_id: str, state: 
                 "confidence": confidence,
                 "blocker_count": len(blockers),
             }
+            shared = _ensure_shared_context(state)
+            shared["user_arbitration_pending"] = True
         a_summary = _aryabhata_summary(state)
         store.append_round(
             session_id=session_id,
             round_num=round_before,
             phase="aryabhata",
             summary=a_summary,
-            state_json=_safe_state(state),
+            state_json=_round_state_snapshot(state),
         )
         store.update_session(
             session_id,
@@ -244,6 +451,44 @@ async def run_existing_state(store: CLISessionStore, *, session_id: str, state: 
             summary={"phase": "aryabhata", **a_summary},
             state_json=_safe_state(state),
         )
+
+        if _is_waiting_for_user(state):
+            waiting_payload = _build_waiting_payload(state, round_before)
+            state["pending_user_action"] = waiting_payload
+            shared = _ensure_shared_context(state)
+            shared["user_arbitration_pending"] = True
+            shared["pending_user_action"] = waiting_payload
+            store.append_message(
+                A2AEnvelope(
+                    session_id=session_id,
+                    round_num=round_before,
+                    sender="aryabhata",
+                    receiver="user",
+                    message_type=MessageType.CLARIFICATION_REQUEST,
+                    content=str(waiting_payload.get("question", "")),
+                    evidence={"waiting": waiting_payload},
+                    confidence_score=float(waiting_payload.get("confidence", 0) or 0) / 100.0,
+                    source="cli_runner",
+                    task_type="arbitration",
+                )
+            )
+            summary = _waiting_summary(state, waiting_payload)
+            store.update_session(
+                session_id,
+                status="waiting_user",
+                current_round=int(state.get("current_round", round_before)),
+                verdict=str(state.get("verdict", "BLOCKED")),
+                summary=summary,
+                state_json=_safe_state(state),
+            )
+            return RunResult(
+                session_id=session_id,
+                status="waiting_user",
+                verdict=str(state.get("verdict", "BLOCKED")),
+                current_round=int(state.get("current_round", round_before)),
+                max_rounds=int(state.get("max_rounds", 5) or 5),
+                summary=summary,
+            )
 
         if state.get("verdict") == "LGTM":
             break
@@ -259,20 +504,7 @@ async def run_existing_state(store: CLISessionStore, *, session_id: str, state: 
         state["verdict"] = "NEEDS_WORK"
 
     learning = store.learn_from_session(session_id, _safe_state(state), subsystem=subsystem)
-    summary = {
-        "conversation_entries": len(state.get("conversation_log") or []),
-        "review_rounds": len(state.get("review_findings") or []),
-        "fix_rounds": len(state.get("fix_attempts") or []),
-        "quality_score": state.get("quality_score", 0.0),
-        "input_type": state.get("input_type", "raw"),
-        "input_history_found": bool(
-            ((state.get("input_metadata") or {}).get("history") or {}).get("found")
-            if isinstance(state.get("input_metadata"), dict)
-            else False
-        ),
-        "kb_active_patterns": len(kb_patterns),
-        "kb_learning": learning,
-    }
+    summary = _final_summary(state, kb_patterns, learning)
     store.update_session(
         session_id,
         status="completed",
@@ -299,6 +531,15 @@ def resume_session_sync(store: CLISessionStore, session_id: str) -> RunResult:
     session = store.get_session(session_id)
     if not session:
         raise ValueError(f"Session not found: {session_id}")
+    if session.status == "waiting_user":
+        return RunResult(
+            session_id=session_id,
+            status=session.status,
+            verdict=session.verdict,
+            current_round=session.current_round,
+            max_rounds=session.max_rounds,
+            summary=session.summary,
+        )
     state = dict(session.state_json or {})
     if not state:
         raise ValueError(f"Session {session_id} has no resumable state")
@@ -313,3 +554,127 @@ def resume_session_sync(store: CLISessionStore, session_id: str) -> RunResult:
             summary=session.summary,
         )
     return asyncio.run(run_existing_state(store, session_id=session_id, state=state))
+
+
+async def continue_with_user_input(
+    store: CLISessionStore,
+    *,
+    session_id: str,
+    response: str,
+    mode: str = "clarify",
+    override_decision: str = "resume",
+) -> RunResult:
+    session = store.get_session(session_id)
+    if not session:
+        raise ValueError(f"Session not found: {session_id}")
+
+    state = dict(session.state_json or {})
+    if not state:
+        raise ValueError(f"Session {session_id} has no resumable state")
+
+    state["session_id"] = session_id
+    shared = _ensure_shared_context(state)
+    shared["user_arbitration_pending"] = False
+    shared["pending_user_action"] = None
+    shared["last_user_input"] = {
+        "mode": mode,
+        "response": str(response or ""),
+        "decision": str(override_decision or "resume"),
+        "timestamp": _utc_now(),
+    }
+    state["pending_user_action"] = None
+    state["interrupt_hint"] = f"user_{mode}: {str(response or '').strip()}"[:800]
+
+    clean_mode = str(mode or "clarify").lower()
+    clean_decision = str(override_decision or "resume").lower()
+
+    if clean_mode == "override" and clean_decision in {"approve", "needs_work"}:
+        final_verdict = "LGTM" if clean_decision == "approve" else "NEEDS_WORK"
+        state["verdict"] = final_verdict
+        summary = {
+            "phase": "user_override",
+            "decision": clean_decision,
+            "note": str(response or "").strip(),
+            "timestamp": _utc_now(),
+        }
+        store.append_message(
+            A2AEnvelope(
+                session_id=session_id,
+                round_num=int(state.get("current_round", 1) or 1),
+                sender="user",
+                receiver="system",
+                message_type=MessageType.APPROVE if final_verdict == "LGTM" else MessageType.ESCALATE,
+                content=f"User override decision: {clean_decision}. {str(response or '').strip()}",
+                evidence={"mode": clean_mode, "decision": clean_decision},
+                confidence_score=1.0,
+                source="cli",
+                task_type="user_override",
+            )
+        )
+        store.update_session(
+            session_id,
+            status="completed",
+            current_round=int(state.get("current_round", 1) or 1),
+            verdict=final_verdict,
+            summary=summary,
+            state_json=_safe_state(state),
+        )
+        return RunResult(
+            session_id=session_id,
+            status="completed",
+            verdict=final_verdict,
+            current_round=int(state.get("current_round", 1) or 1),
+            max_rounds=int(state.get("max_rounds", session.max_rounds) or session.max_rounds),
+            summary=summary,
+        )
+
+    state["verdict"] = "PENDING"
+    if int(state.get("current_round", 1) or 1) <= 0:
+        state["current_round"] = 1
+
+    store.append_message(
+        A2AEnvelope(
+            session_id=session_id,
+            round_num=int(state.get("current_round", 1) or 1),
+            sender="user",
+            receiver="chanakya",
+            message_type=_user_response_message_type(clean_mode),
+            content=str(response or "").strip(),
+            evidence={"mode": clean_mode, "decision": clean_decision},
+            confidence_score=1.0,
+            source="cli",
+            task_type="clarification",
+        )
+    )
+    store.update_session(
+        session_id,
+        status="running",
+        current_round=int(state.get("current_round", 1) or 1),
+        verdict="PENDING",
+        summary={
+            "phase": "user_response",
+            "mode": clean_mode,
+            "decision": clean_decision,
+        },
+        state_json=_safe_state(state),
+    )
+    return await run_existing_state(store, session_id=session_id, state=state)
+
+
+def continue_with_user_input_sync(
+    store: CLISessionStore,
+    *,
+    session_id: str,
+    response: str,
+    mode: str = "clarify",
+    override_decision: str = "resume",
+) -> RunResult:
+    return asyncio.run(
+        continue_with_user_input(
+            store,
+            session_id=session_id,
+            response=response,
+            mode=mode,
+            override_decision=override_decision,
+        )
+    )

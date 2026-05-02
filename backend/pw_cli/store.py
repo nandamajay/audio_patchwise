@@ -410,12 +410,53 @@ class CLISessionStore:
             return f"global::{issue_type}::{digest}"
         return f"subsystem::{subsystem}::{issue_type}::{digest}"
 
+    def _normalize_fix_text(self, fix_text: str) -> str:
+        collapsed = " ".join(str(fix_text or "").split())
+        return collapsed.strip()
+
+    def _is_low_quality_fix(self, issue_type: str, fix_text: str, status: str) -> bool:
+        allowed_issue_types = {"STYLE", "LOGIC", "MEMORY", "COMPLIANCE", "COMMIT", "COVER_LETTER"}
+        if issue_type not in allowed_issue_types:
+            return True
+        if status not in {"FIXED", "APPLIED"}:
+            return True
+        normalized = self._normalize_fix_text(fix_text)
+        if len(normalized) < 8 or len(normalized) > 1200:
+            return True
+        lowered = normalized.lower()
+        noisy_markers = {
+            "placeholder",
+            "todo",
+            "tbd",
+            "fixme",
+            "n/a",
+            "no change required",
+            "same as before",
+        }
+        if any(marker in lowered for marker in noisy_markers):
+            return True
+        return False
+
     def learn_from_session(self, session_id: str, state_json: dict[str, Any], subsystem: str) -> dict[str, Any]:
         fix_attempts = state_json.get("fix_attempts") if isinstance(state_json.get("fix_attempts"), list) else []
         verdict = str(state_json.get("verdict", "NEEDS_WORK"))
+        quality_score = float(state_json.get("quality_score", 0.0) or 0.0)
         success = verdict == "LGTM"
+        should_learn = success or quality_score >= 85.0
         patterns_seen: set[str] = set()
+        fix_signatures_seen: set[str] = set()
+        skipped_low_quality = 0
         learned = 0
+
+        if not should_learn:
+            return {
+                "learned_patterns": 0,
+                "unique_patterns": 0,
+                "verdict": verdict,
+                "skipped_low_quality": 0,
+                "learning_mode": "disabled",
+                "reason": "quality_gate_not_met",
+            }
 
         for attempt in fix_attempts:
             fixes = attempt.get("fixes") if isinstance(attempt, dict) and isinstance(attempt.get("fixes"), list) else []
@@ -424,17 +465,31 @@ class CLISessionStore:
                     continue
                 issue_type = str(fix.get("category", "STYLE") or "STYLE")
                 fix_text = str(fix.get("fix", "") or "")
+                fix_status = str(fix.get("status", "") or "").upper()
                 if not fix_text:
+                    skipped_low_quality += 1
                     continue
+                if self._is_low_quality_fix(issue_type, fix_text, fix_status):
+                    skipped_low_quality += 1
+                    continue
+                normalized_fix = self._normalize_fix_text(fix_text)
+                signature = hashlib.sha1(
+                    f"{subsystem}|{issue_type}|{normalized_fix[:220]}".encode("utf-8", errors="ignore")
+                ).hexdigest()
+                if signature in fix_signatures_seen:
+                    # Prevent duplicate increments when same fix appears repeatedly in one session.
+                    continue
+                fix_signatures_seen.add(signature)
                 pattern_payload = {
                     "issue_type": issue_type,
-                    "fix": fix_text,
+                    "fix": normalized_fix,
                     "problem": str(fix.get("problem", "") or ""),
-                    "status": str(fix.get("status", "") or ""),
+                    "status": fix_status,
                     "subsystem": subsystem,
+                    "quality_score": quality_score,
                 }
                 for scope in ("subsystem", "global"):
-                    key = self._pattern_key(subsystem, issue_type, fix_text, scope=scope)
+                    key = self._pattern_key(subsystem, issue_type, normalized_fix, scope=scope)
                     self._upsert_pattern(
                         scope=scope,
                         subsystem=subsystem,
@@ -466,6 +521,8 @@ class CLISessionStore:
             "learned_patterns": learned,
             "unique_patterns": len(patterns_seen),
             "verdict": verdict,
+            "skipped_low_quality": skipped_low_quality,
+            "learning_mode": "strict_quality_gate",
         }
 
     def get_active_kb_patterns(self, subsystem: str, limit: int = 12) -> list[dict[str, Any]]:
