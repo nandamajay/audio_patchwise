@@ -98,6 +98,12 @@ def _progress_line(event: dict[str, Any]) -> str | None:
         round_num = event.get("round")
         src = event.get("source")
         metadata = event.get("metadata") if isinstance(event.get("metadata"), dict) else {}
+        if msg_type == "task_start":
+            snippet = str(event.get("content") or "").strip().replace("\n", " ")
+            return f"[progress] round={round_num} {agent}:task_start src={src} {snippet}"
+        if msg_type == "task_done":
+            snippet = str(event.get("content") or "").strip().replace("\n", " ")
+            return f"[progress] round={round_num} {agent}:task_done src={src} {snippet}"
         if msg_type == "fix_complete":
             content = str(event.get("content") or "")
             has_cover = "<<<COVER_LETTER_START>>>" in content
@@ -141,6 +147,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         "last_event_monotonic": time.monotonic(),
         "active_phase": None,
         "active_round": None,
+        "active_task": None,
     }
     stop_event = threading.Event()
     poll_store = CLISessionStore(db_path=args.db_path)
@@ -171,10 +178,11 @@ def cmd_run(args: argparse.Namespace) -> int:
             if snapshot == last_snapshot:
                 active_phase = run_state.get("active_phase") or "unknown"
                 active_round = run_state.get("active_round") or session.current_round
+                active_task = run_state.get("active_task") or "waiting_for_agent_update"
                 silent_for = int(max(0.0, time.monotonic() - float(run_state.get("last_event_monotonic") or 0.0)))
                 print(
                     f"[heartbeat] still running round={active_round}/{session.max_rounds} "
-                    f"phase={active_phase} silent_for={silent_for}s",
+                    f"phase={active_phase} task={active_task} silent_for={silent_for}s",
                     flush=True,
                 )
                 continue
@@ -200,9 +208,11 @@ def cmd_run(args: argparse.Namespace) -> int:
         if event.get("type") == "phase":
             run_state["active_phase"] = event.get("phase")
             run_state["active_round"] = event.get("round")
+            run_state["active_task"] = None
         elif event.get("type") == "phase_complete":
             run_state["active_phase"] = None
             run_state["active_round"] = event.get("round")
+            run_state["active_task"] = None
 
         line = _progress_line(event)
         if not line:
@@ -215,6 +225,11 @@ def cmd_run(args: argparse.Namespace) -> int:
             if key == run_state.get("last_stream_key") and (now - float(run_state.get("last_print_monotonic") or 0.0)) < 6.0:
                 return
             run_state["last_stream_key"] = key
+            msg_type = str(event.get("message_type") or "")
+            if msg_type == "task_start":
+                run_state["active_task"] = str(event.get("content") or "").strip()[:120]
+            elif msg_type == "task_done":
+                run_state["active_task"] = None
 
         if line == run_state.get("last_line") and (now - float(run_state.get("last_print_monotonic") or 0.0)) < 4.0:
             return

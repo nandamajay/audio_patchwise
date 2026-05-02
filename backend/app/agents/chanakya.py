@@ -837,6 +837,39 @@ async def chanakya_review_node(state: PatchWiseState) -> PatchWiseState:
         session_id=session_id,
         fallback_api_client=fallback_client,
     )
+    _emit(
+        state,
+        {
+            "agent": "chanakya",
+            "type": "task_start",
+            "round": round_id,
+            "task_type": "checkpatch",
+            "source": "cli",
+            "content": "Running deep checkpatch + commit message analysis on dev-compute.",
+        },
+    )
+    _emit(
+        state,
+        {
+            "agent": "chanakya",
+            "type": "task_start",
+            "round": round_id,
+            "task_type": "lore",
+            "source": "cli",
+            "content": "Researching lore history, reviewer feedback, and prior versions.",
+        },
+    )
+    _emit(
+        state,
+        {
+            "agent": "chanakya",
+            "type": "task_start",
+            "round": round_id,
+            "task_type": "symbols",
+            "source": "cli",
+            "content": "Validating symbols/exports and namespace constraints.",
+        },
+    )
     patch_subject = _extract_patch_subject(patch_text)
     patch_hash = hashlib.sha256(patch_text.encode("utf-8", errors="ignore")).hexdigest()[:12]
     q_results = await asyncio.gather(
@@ -883,6 +916,51 @@ async def chanakya_review_node(state: PatchWiseState) -> PatchWiseState:
     q_lore = q_results[1] if isinstance(q_results[1], dict) else {"success": False, "source": "fallback", "output": ""}
     q_symbols = q_results[2] if isinstance(q_results[2], dict) else {"success": False, "source": "fallback", "output": ""}
     lore_thread_intel = q_results[3] if isinstance(q_results[3], dict) else _build_lore_thread_intelligence(None)
+    _emit(
+        state,
+        {
+            "agent": "chanakya",
+            "type": "task_done",
+            "round": round_id,
+            "task_type": "checkpatch",
+            "source": q_checkpatch.get("source", "none"),
+            "content": (
+                "checkpatch analysis complete"
+                if q_checkpatch.get("success")
+                else f"checkpatch analysis degraded ({q_checkpatch.get('error', 'no_output')})"
+            ),
+        },
+    )
+    _emit(
+        state,
+        {
+            "agent": "chanakya",
+            "type": "task_done",
+            "round": round_id,
+            "task_type": "lore",
+            "source": q_lore.get("source", "none"),
+            "content": (
+                "lore history intelligence complete"
+                if q_lore.get("success")
+                else f"lore history degraded ({q_lore.get('error', 'no_output')})"
+            ),
+        },
+    )
+    _emit(
+        state,
+        {
+            "agent": "chanakya",
+            "type": "task_done",
+            "round": round_id,
+            "task_type": "symbols",
+            "source": q_symbols.get("source", "none"),
+            "content": (
+                "symbol validation complete"
+                if q_symbols.get("success")
+                else f"symbol validation degraded ({q_symbols.get('error', 'no_output')})"
+            ),
+        },
+    )
     q_sources = [q_checkpatch.get("source"), q_lore.get("source"), q_symbols.get("source")]
     qgenie_source = "cli" if "cli" in q_sources else ("fallback" if "fallback" in q_sources else "none")
     state["qgenie_last_source"] = qgenie_source
