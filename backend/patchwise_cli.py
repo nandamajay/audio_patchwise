@@ -3,6 +3,10 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import threading
+import time
+from datetime import datetime
+from typing import Any
 
 from pw_cli.runner import continue_with_user_input_sync, resume_session_sync, run_new_session_sync
 from pw_cli.store import CLISessionStore
@@ -35,18 +39,143 @@ def _result_exit_code(result) -> int:
     return 1
 
 
+def _format_ts(raw: str | None) -> str:
+    if not raw:
+        return "-"
+    try:
+        dt = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+        return dt.strftime("%H:%M:%S")
+    except Exception:
+        return str(raw)
+
+
+def _progress_line(event: dict[str, Any]) -> str | None:
+    kind = str(event.get("type") or "")
+    if kind == "session_created":
+        sid = event.get("session_id")
+        mr = event.get("max_rounds")
+        return f"[progress] session={sid} started (max_rounds={mr})"
+    if kind == "phase":
+        return f"[progress] round={event.get('round')} phase={event.get('phase')} started"
+    if kind == "phase_complete":
+        verdict = event.get("verdict")
+        return f"[progress] round={event.get('round')} phase={event.get('phase')} done verdict={verdict}"
+    if kind == "status":
+        return (
+            f"[progress] status={event.get('status')} round={event.get('round')} "
+            f"verdict={event.get('verdict', '-')}"
+        )
+    if kind == "stream":
+        msg_type = str(event.get("message_type") or "")
+        agent = str(event.get("agent") or "")
+        round_num = event.get("round")
+        src = event.get("source")
+        if msg_type in {"analysis_source", "lore_intelligence", "aryabhata_validation", "fix_complete"}:
+            snippet = str(event.get("content") or "").strip().replace("\n", " ")
+            if len(snippet) > 110:
+                snippet = snippet[:110] + "..."
+            return f"[progress] round={round_num} {agent}:{msg_type} src={src} {snippet}"
+    return None
+
+
 def cmd_run(args: argparse.Namespace) -> int:
     store = CLISessionStore(db_path=args.db_path)
-    result = run_new_session_sync(
-        store,
-        input_value=args.input,
-        input_type=args.input_type,
-        subsystem=args.subsystem,
-        source_path=args.source_path,
-        llm_provider=args.llm_provider,
-        llm_model=args.llm_model,
-        max_rounds=args.max_rounds,
+    print(
+        f"[progress] initializing run input_type={args.input_type} subsystem={args.subsystem} max_rounds={args.max_rounds}",
+        flush=True,
     )
+    run_state: dict[str, Any] = {
+        "session_id": None,
+        "last_line": "",
+        "last_stream_key": None,
+        "last_print_monotonic": 0.0,
+    }
+    stop_event = threading.Event()
+    poll_store = CLISessionStore(db_path=args.db_path)
+
+    def _heartbeat_loop() -> None:
+        last_snapshot = None
+        init_beats = 0
+        while not stop_event.wait(8.0):
+            sid = run_state.get("session_id")
+            if not sid:
+                init_beats += 1
+                if init_beats % 1 == 0:
+                    print("[heartbeat] preparing input and creating session...", flush=True)
+                continue
+            try:
+                session = poll_store.get_session(str(sid))
+            except Exception:
+                continue
+            if not session:
+                continue
+            snapshot = (
+                session.status,
+                session.current_round,
+                session.max_rounds,
+                session.verdict,
+                session.updated_at,
+            )
+            if snapshot == last_snapshot:
+                continue
+            last_snapshot = snapshot
+            print(
+                f"[heartbeat] session={session.session_id} status={session.status} "
+                f"round={session.current_round}/{session.max_rounds} verdict={session.verdict} "
+                f"updated={_format_ts(session.updated_at)}",
+                flush=True,
+            )
+
+    hb_thread = threading.Thread(target=_heartbeat_loop, name="pw-cli-heartbeat", daemon=True)
+    hb_thread.start()
+
+    def _progress_callback(event: dict[str, Any]) -> None:
+        if not isinstance(event, dict):
+            return
+        if event.get("session_id") and not run_state.get("session_id"):
+            run_state["session_id"] = event.get("session_id")
+
+        line = _progress_line(event)
+        if not line:
+            return
+
+        # Prevent token-level spam from stream events.
+        now = time.monotonic()
+        if event.get("type") == "stream":
+            key = (event.get("round"), event.get("agent"), event.get("message_type"), event.get("source"))
+            if key == run_state.get("last_stream_key") and (now - float(run_state.get("last_print_monotonic") or 0.0)) < 6.0:
+                return
+            run_state["last_stream_key"] = key
+
+        if line == run_state.get("last_line") and (now - float(run_state.get("last_print_monotonic") or 0.0)) < 4.0:
+            return
+        run_state["last_line"] = line
+        run_state["last_print_monotonic"] = now
+        print(line, flush=True)
+
+    try:
+        result = run_new_session_sync(
+            store,
+            input_value=args.input,
+            input_type=args.input_type,
+            subsystem=args.subsystem,
+            source_path=args.source_path,
+            llm_provider=args.llm_provider,
+            llm_model=args.llm_model,
+            max_rounds=args.max_rounds,
+            progress_callback=_progress_callback,
+        )
+    except KeyboardInterrupt:
+        sid = run_state.get("session_id")
+        print("\nInterrupted by user.", flush=True)
+        if sid:
+            print(f"Session preserved: {sid}", flush=True)
+            print(f"Resume: ./run.sh cli resume --session {sid}", flush=True)
+        return 130
+    finally:
+        stop_event.set()
+        hb_thread.join(timeout=0.5)
+
     _emit_result(result)
     return _result_exit_code(result)
 

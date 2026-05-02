@@ -4,9 +4,10 @@ import asyncio
 import hashlib
 import json
 import os
+from contextlib import suppress
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Callable, Optional
 
 from app.agents.aryabhata import aryabhata_fix_node_async
 from app.agents.chanakya import chanakya_review_node
@@ -23,6 +24,9 @@ class RunResult:
     current_round: int
     max_rounds: int
     summary: dict[str, Any]
+
+
+ProgressCallback = Optional[Callable[[dict[str, Any]], None]]
 
 
 def _utc_now() -> str:
@@ -200,6 +204,39 @@ def _user_response_message_type(mode: str) -> MessageType:
     return MessageType.RESPONSE
 
 
+def _emit_progress(callback: ProgressCallback, payload: dict[str, Any]) -> None:
+    if not callable(callback):
+        return
+    try:
+        callback(payload)
+    except Exception:
+        # Progress reporting must never break the review flow.
+        pass
+
+
+def _run_coro_sync(coro):
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    try:
+        return loop.run_until_complete(coro)
+    except KeyboardInterrupt:
+        pending = [task for task in asyncio.all_tasks(loop) if not task.done()]
+        for task in pending:
+            task.cancel()
+        if pending:
+            with suppress(Exception):
+                loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
+        raise
+    finally:
+        with suppress(Exception):
+            loop.run_until_complete(loop.shutdown_asyncgens())
+        with suppress(Exception):
+            loop.run_until_complete(loop.shutdown_default_executor())
+        asyncio.set_event_loop(None)
+        with suppress(Exception):
+            loop.close()
+
+
 def _initial_state(
     session_id: str,
     patch_text: str,
@@ -293,6 +330,7 @@ async def run_new_session(
     llm_provider: str,
     llm_model: str,
     max_rounds: int,
+    progress_callback: ProgressCallback = None,
 ) -> RunResult:
     bundle = await resolve_input_bundle(input_value, input_type, subsystem=subsystem)
     patch_text = bundle.patch_text
@@ -313,6 +351,17 @@ async def run_new_session(
         max_rounds=max_rounds,
         state_json=_safe_state(bootstrap_state),
     )
+    _emit_progress(
+        progress_callback,
+        {
+            "type": "session_created",
+            "session_id": session_id,
+            "status": "running",
+            "round": 1,
+            "max_rounds": int(max_rounds),
+            "timestamp": _utc_now(),
+        },
+    )
     state = _initial_state(
         session_id=session_id,
         patch_text=patch_text,
@@ -323,13 +372,38 @@ async def run_new_session(
         llm_model=llm_model,
         max_rounds=max_rounds,
     )
-    return await run_existing_state(store, session_id=session_id, state=state)
+    return await run_existing_state(
+        store,
+        session_id=session_id,
+        state=state,
+        progress_callback=progress_callback,
+    )
 
 
-async def run_existing_state(store: CLISessionStore, *, session_id: str, state: dict[str, Any]) -> RunResult:
+async def run_existing_state(
+    store: CLISessionStore,
+    *,
+    session_id: str,
+    state: dict[str, Any],
+    progress_callback: ProgressCallback = None,
+) -> RunResult:
     def _stream_callback(payload: dict[str, Any]) -> None:
         envelope = A2AEnvelope.from_agent_payload(session_id, payload)
         store.append_message(envelope)
+        _emit_progress(
+            progress_callback,
+            {
+                "type": "stream",
+                "session_id": session_id,
+                "round": int(payload.get("round", state.get("current_round", 1)) or 1),
+                "agent": payload.get("agent"),
+                "message_type": payload.get("type"),
+                "task_type": payload.get("task_type"),
+                "source": payload.get("source"),
+                "content": str(payload.get("content", "") or "")[:220],
+                "timestamp": _utc_now(),
+            },
+        )
 
     state["_stream_callback"] = _stream_callback
     max_rounds = int(state.get("max_rounds", 5) or 5)
@@ -360,11 +434,35 @@ async def run_existing_state(store: CLISessionStore, *, session_id: str, state: 
             )
         )
 
+    _emit_progress(
+        progress_callback,
+        {
+            "type": "status",
+            "session_id": session_id,
+            "status": "running",
+            "stage": "a2a_loop_start",
+            "round": int(state.get("current_round", 1) or 1),
+            "max_rounds": int(state.get("max_rounds", 5) or 5),
+            "timestamp": _utc_now(),
+        },
+    )
+
     while True:
         round_before = int(state.get("current_round", 1) or 1)
         if round_before > max_rounds:
             break
 
+        _emit_progress(
+            progress_callback,
+            {
+                "type": "phase",
+                "session_id": session_id,
+                "phase": "chanakya",
+                "round": round_before,
+                "status": "running",
+                "timestamp": _utc_now(),
+            },
+        )
         state = await chanakya_review_node(state)
         c_summary = _chanakya_summary(state)
         store.append_round(
@@ -380,6 +478,18 @@ async def run_existing_state(store: CLISessionStore, *, session_id: str, state: 
             verdict=str(state.get("verdict", "PENDING")),
             summary={"phase": "chanakya", **c_summary},
             state_json=_safe_state(state),
+        )
+        _emit_progress(
+            progress_callback,
+            {
+                "type": "phase_complete",
+                "session_id": session_id,
+                "phase": "chanakya",
+                "round": round_before,
+                "summary": c_summary,
+                "verdict": str(state.get("verdict", "PENDING")),
+                "timestamp": _utc_now(),
+            },
         )
 
         if _is_waiting_for_user(state):
@@ -411,6 +521,18 @@ async def run_existing_state(store: CLISessionStore, *, session_id: str, state: 
                 summary=summary,
                 state_json=_safe_state(state),
             )
+            _emit_progress(
+                progress_callback,
+                {
+                    "type": "status",
+                    "session_id": session_id,
+                    "status": "waiting_user",
+                    "round": int(state.get("current_round", round_before)),
+                    "verdict": str(state.get("verdict", "BLOCKED")),
+                    "summary": summary,
+                    "timestamp": _utc_now(),
+                },
+            )
             return RunResult(
                 session_id=session_id,
                 status="waiting_user",
@@ -423,6 +545,17 @@ async def run_existing_state(store: CLISessionStore, *, session_id: str, state: 
         if state.get("verdict") == "LGTM":
             break
 
+        _emit_progress(
+            progress_callback,
+            {
+                "type": "phase",
+                "session_id": session_id,
+                "phase": "aryabhata",
+                "round": round_before,
+                "status": "running",
+                "timestamp": _utc_now(),
+            },
+        )
         state = await aryabhata_fix_node_async(state)
         validation = state.get("aryabhata_validation") if isinstance(state.get("aryabhata_validation"), dict) else {}
         blockers = validation.get("blockers") if isinstance(validation.get("blockers"), list) else []
@@ -450,6 +583,18 @@ async def run_existing_state(store: CLISessionStore, *, session_id: str, state: 
             verdict=str(state.get("verdict", "PENDING")),
             summary={"phase": "aryabhata", **a_summary},
             state_json=_safe_state(state),
+        )
+        _emit_progress(
+            progress_callback,
+            {
+                "type": "phase_complete",
+                "session_id": session_id,
+                "phase": "aryabhata",
+                "round": round_before,
+                "summary": a_summary,
+                "verdict": str(state.get("verdict", "PENDING")),
+                "timestamp": _utc_now(),
+            },
         )
 
         if _is_waiting_for_user(state):
@@ -480,6 +625,18 @@ async def run_existing_state(store: CLISessionStore, *, session_id: str, state: 
                 verdict=str(state.get("verdict", "BLOCKED")),
                 summary=summary,
                 state_json=_safe_state(state),
+            )
+            _emit_progress(
+                progress_callback,
+                {
+                    "type": "status",
+                    "session_id": session_id,
+                    "status": "waiting_user",
+                    "round": int(state.get("current_round", round_before)),
+                    "verdict": str(state.get("verdict", "BLOCKED")),
+                    "summary": summary,
+                    "timestamp": _utc_now(),
+                },
             )
             return RunResult(
                 session_id=session_id,
@@ -513,6 +670,18 @@ async def run_existing_state(store: CLISessionStore, *, session_id: str, state: 
         summary=summary,
         state_json=_safe_state(state),
     )
+    _emit_progress(
+        progress_callback,
+        {
+            "type": "status",
+            "session_id": session_id,
+            "status": "completed",
+            "round": int(state.get("current_round", 1) or 1),
+            "verdict": str(state.get("verdict", "NEEDS_WORK")),
+            "summary": summary,
+            "timestamp": _utc_now(),
+        },
+    )
     return RunResult(
         session_id=session_id,
         status="completed",
@@ -524,7 +693,7 @@ async def run_existing_state(store: CLISessionStore, *, session_id: str, state: 
 
 
 def run_new_session_sync(store: CLISessionStore, **kwargs: Any) -> RunResult:
-    return asyncio.run(run_new_session(store, **kwargs))
+    return _run_coro_sync(run_new_session(store, **kwargs))
 
 
 def resume_session_sync(store: CLISessionStore, session_id: str) -> RunResult:
@@ -553,7 +722,7 @@ def resume_session_sync(store: CLISessionStore, session_id: str) -> RunResult:
             max_rounds=session.max_rounds,
             summary=session.summary,
         )
-    return asyncio.run(run_existing_state(store, session_id=session_id, state=state))
+    return _run_coro_sync(run_existing_state(store, session_id=session_id, state=state))
 
 
 async def continue_with_user_input(
@@ -669,7 +838,7 @@ def continue_with_user_input_sync(
     mode: str = "clarify",
     override_decision: str = "resume",
 ) -> RunResult:
-    return asyncio.run(
+    return _run_coro_sync(
         continue_with_user_input(
             store,
             session_id=session_id,
