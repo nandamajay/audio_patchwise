@@ -1,5 +1,6 @@
-import json, re, asyncio
-from typing import Dict, Any, List
+import json
+import re
+from typing import Dict, Any
 from .fix_engine import AryabhataFixEngine
 from .prompts import ARYABHATA_SYSTEM_PROMPT, ARYABHATA_FIX_INSTRUCTION
 from ..shared.llm_factory import LLMFactory
@@ -68,8 +69,10 @@ async def aryabhata_node(state: Dict[str, Any]) -> Dict[str, Any]:
         if blocks:
             for b in blocks:
                 b = b.strip()
-                if '0/2' in b or '0/1' in b or 'cover-letter' in b.lower(): cover_letter = b
-                else: llm_fixed = b
+                if '0/2' in b or '0/1' in b or 'cover-letter' in b.lower():
+                    cover_letter = b
+                else:
+                    llm_fixed = b
         else:
             logger.error('ARYABHATA LLM did not produce FIXED_PATCH markers')
             await stream_agent_message(session_id, 'aryabhata', 'warning',

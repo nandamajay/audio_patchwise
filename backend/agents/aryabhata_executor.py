@@ -2,14 +2,16 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import re
 import shlex
-from typing import List, Optional
+from typing import List
 
 from core.ssh_pool import AgentRole, ssh_pool
 from graph.state import fix_ready_event
 
 logger = logging.getLogger("uvicorn.error")
+QGENIE_AGENT_BIN = os.getenv("QGENIE_AGENT_BIN", "qgenie")
 
 
 class AryabhataExecutor:
@@ -138,6 +140,7 @@ class AryabhataExecutor:
             self._check_stale_prototypes(commits),
             self._verify_commit_messages(patch_dir),
             self._verify_cover_letter(patch_dir),
+            self._run_qgenie_validation(commits, patch_dir),
             return_exceptions=True,
         )
         validation = {
@@ -147,6 +150,7 @@ class AryabhataExecutor:
             "stale_prototypes": results[3] if not isinstance(results[3], Exception) else {},
             "commit_messages": results[4] if not isinstance(results[4], Exception) else {},
             "cover_letter": results[5] if not isinstance(results[5], Exception) else {},
+            "qgenie_agent": results[6] if not isinstance(results[6], Exception) else {},
             "execution_mode": ssh_pool.mode.value,
             "preload_used": True,
         }
@@ -156,6 +160,7 @@ class AryabhataExecutor:
             and validation["cross_line_impact"].get("critical_impacts", []) == []
             and validation["commit_messages"].get("issues", []) == []
             and validation["cover_letter"].get("errors", []) == []
+            and not validation["qgenie_agent"].get("critical", False)
         )
         validation["verdict"] = "LGTM" if all_clean else "NEEDS_WORK"
         validation["lgtm"] = all_clean
@@ -282,3 +287,28 @@ class AryabhataExecutor:
         if "*** SUBJECT HERE ***" in text or "*** BLURB HERE ***" in text:
             errors.append("PLACEHOLDER_USE")
         return {"errors": errors}
+
+    async def _run_qgenie_validation(self, commits: List[str], patch_dir: str) -> dict:
+        """
+        Complementary validation pass via qgenie agent over SSH/dev-compute.
+        """
+        commit_list = ", ".join(commits) if commits else "HEAD"
+        prompt = (
+            f"Validate fixes in {patch_dir} against repo {self.kernel_path} for commits [{commit_list}]. "
+            "Focus on symbol lookup correctness, kernel style verification, and regressions missed by basic checkpatch. "
+            "Return concise JSON with keys: summary, critical_findings, warnings, verdict."
+        )
+        cmd = (
+            "export PATH=$HOME/.local/bin:$PATH && "
+            f"{shlex.quote(QGENIE_AGENT_BIN)} agent {shlex.quote(prompt)}"
+        )
+        result = await ssh_pool.exec(self.agent, self.session_id, cmd, timeout=300)
+        merged = ((result.stdout or "") + "\n" + (result.stderr or "")).lower()
+        critical = '"critical"' in merged or "critical_findings" in merged or "severity: critical" in merged
+        return {
+            "stdout": result.stdout,
+            "stderr": result.stderr,
+            "exit_code": result.exit_code,
+            "critical": critical and result.exit_code == 0,
+            "agent_cmd": "qgenie agent",
+        }

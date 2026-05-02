@@ -26,7 +26,6 @@ async def aryabhata_node(state: dict[str, Any]) -> dict[str, Any]:
     """
     Async node variant for direct use in graph experiments.
     """
-    session_id = state["session_id"]
     current_patch = state.get("current_patch", "")
     review_data = state.get("latest_review", {})
     review_issues = [ReviewIssue.model_validate(item) for item in review_data.get("issues", [])]

@@ -306,8 +306,8 @@ class PatchRebuilder:
             parts.append(f"+++ b/{section.new_file}")
 
             for hunk in section.hunks:
-                old_count = sum(1 for l in hunk.lines if l.startswith("-") or l.startswith(" "))
-                new_count = sum(1 for l in hunk.lines if l.startswith("+") or l.startswith(" "))
+                old_count = sum(1 for hunk_line in hunk.lines if hunk_line.startswith("-") or hunk_line.startswith(" "))
+                new_count = sum(1 for hunk_line in hunk.lines if hunk_line.startswith("+") or hunk_line.startswith(" "))
                 parts.append(f"@@ -{hunk.old_start},{old_count} +{hunk.new_start},{new_count} @@")
                 parts.extend(hunk.lines)
 

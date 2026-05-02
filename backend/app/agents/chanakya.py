@@ -1,24 +1,26 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
 import re
+import hashlib
 from typing import Any, Optional
 
-from agents.chanakya_agent import CHANAKYA_ISSUE_FORMAT_PROMPT
 from app.agents.state import PatchWiseState
 from app.skills.patchwise_skill import full_patch_analysis
 from app.skills.search_skill import SearchSkill
 from core.llm_factory import get_llm
 from core.patchwise_skill import PatchWiseResult, PatchWiseSkill
-from core.ssh_pool import ssh_pool
-from agents.version_intelligence import fetch_version_history
+from core.ssh_pool import AgentRole, ssh_pool
+from agents.version_intelligence import fetch_version_history, fetch_lore_thread
 from agents.aryabhata_fix_engine import AryabhataFixEngine
 from agents.cover_letter_generator import generate_cover_letter_if_missing
 from intelligence.cover_letter_reviewer import CoverLetterReviewer
 from intelligence.patch_version_intelligence import PatchVersionIntelligence
 from models.patch_models import LineEdit, ReviewIssue
+from qgenie_executor import QGenieExecutor
 
 
 CHANAKYA_SYSTEM_PROMPT = """
@@ -98,6 +100,25 @@ _PATCHWISE_INIT_ERROR: str | None = None
 logger = logging.getLogger("uvicorn.error")
 
 
+class _FallbackAPIClient:
+    def __init__(self, provider: str | None, model: str | None):
+        self.provider = provider or "qgenie"
+        self.model = model or "gpt-4o"
+
+    def analyze(self, task: str, context: str | None = None) -> str:
+        llm = get_llm(model=self.model, provider=self.provider, temperature=0.1, streaming=False)
+        prompt = (
+            "Provide concise Linux-kernel patch analysis.\n\n"
+            f"TASK:\n{task}\n\n"
+            f"CONTEXT:\n{context or ''}\n"
+        )
+        response = llm.invoke(prompt)
+        content = getattr(response, "content", response)
+        if isinstance(content, list):
+            return "\n".join(str(item) for item in content)
+        return str(content or "")
+
+
 def _ensure_list(state: dict[str, Any], key: str) -> list[Any]:
     value = state.get(key)
     if not isinstance(value, list):
@@ -136,6 +157,28 @@ def _resolve_kernel_path(source_hint: str, patch_text: str) -> Optional[str]:
 
 
 def _emit(state: dict[str, Any], payload: dict[str, Any]) -> None:
+    agent = payload.get("agent")
+    if agent in {"chanakya", "aryabhata"}:
+        metadata = payload.get("metadata")
+        if not isinstance(metadata, dict):
+            metadata = {}
+        source = (
+            payload.get("source")
+            or metadata.get("source")
+            or state.get("qgenie_last_source")
+            or "fallback"
+        )
+        task_type = (
+            payload.get("task_type")
+            or metadata.get("task_type")
+            or payload.get("type")
+            or "analysis"
+        )
+        payload["source"] = source
+        payload["task_type"] = task_type
+        metadata.setdefault("source", source)
+        metadata.setdefault("task_type", task_type)
+        payload["metadata"] = metadata
     callback = state.get("_stream_callback")
     if callable(callback):
         callback(payload)
@@ -288,6 +331,131 @@ def _extract_json(text: str) -> Any | None:
         except Exception:
             continue
     return None
+
+
+def _extract_patch_subject(patch_text: str) -> str:
+    for line in (patch_text or "").splitlines():
+        if line.startswith("Subject:"):
+            return line.replace("Subject:", "", 1).strip()
+    return "Patch review"
+
+
+def _qgenie_findings_to_issues(output: str, category: str, default_suggestion: str) -> list[dict[str, Any]]:
+    if not output:
+        return []
+    issues: list[dict[str, Any]] = []
+    parsed = _extract_json(output)
+
+    def _coerce(item: dict[str, Any]) -> dict[str, Any]:
+        msg = str(
+            item.get("error_message")
+            or item.get("message")
+            or item.get("summary")
+            or item.get("finding")
+            or "QGenie finding"
+        ).strip()
+        suggestion = str(item.get("suggested_fix") or item.get("suggestion") or default_suggestion).strip()
+        line = int(item.get("line_number", 1) or 1)
+        sev = str(item.get("severity", "WARNING")).upper()
+        if sev not in {"CRITICAL", "WARNING", "INFO"}:
+            sev = "WARNING"
+        return {
+            "issue_type": category,
+            "severity": sev,
+            "line_number": line,
+            "description": msg,
+            "suggestion": suggestion,
+        }
+
+    if isinstance(parsed, dict):
+        candidates = parsed.get("findings")
+        if isinstance(candidates, list):
+            for item in candidates[:6]:
+                if isinstance(item, dict):
+                    issues.append(_coerce(item))
+    elif isinstance(parsed, list):
+        for item in parsed[:6]:
+            if isinstance(item, dict):
+                issues.append(_coerce(item))
+
+    if issues:
+        return issues
+
+    for line in [ln.strip() for ln in output.splitlines() if ln.strip()][:6]:
+        sev = "CRITICAL" if "critical" in line.lower() else "WARNING"
+        line_match = re.search(r"line\\s+(\\d+)", line, re.IGNORECASE)
+        issues.append(
+            {
+                "issue_type": category,
+                "severity": sev,
+                "line_number": int(line_match.group(1)) if line_match else 1,
+                "description": line[:220],
+                "suggestion": default_suggestion,
+            }
+        )
+    return issues
+
+
+def _count_matches(text: str, patterns: list[str]) -> int:
+    if not text:
+        return 0
+    lowered = text.lower()
+    return sum(1 for pattern in patterns if pattern in lowered)
+
+
+def _build_lore_thread_intelligence(thread: dict[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(thread, dict):
+        return {
+            "found": False,
+            "status": "unknown",
+            "reviewed_by": 0,
+            "acked_by": 0,
+            "applied": False,
+            "evidence": [],
+        }
+
+    comments = thread.get("comments") if isinstance(thread.get("comments"), list) else []
+    patches = thread.get("patches") if isinstance(thread.get("patches"), list) else []
+    reviewed_by = 0
+    acked_by = 0
+    applied = False
+    evidence: list[str] = []
+
+    for comment in comments:
+        body = str(comment.get("body", "") or "")
+        reviewed_by += _count_matches(body, ["reviewed-by:"])
+        acked_by += _count_matches(body, ["acked-by:"])
+        if _count_matches(body, ["applied, thanks", "applied.", "merged"]):
+            applied = True
+            evidence.append(str(body.splitlines()[0] if body.splitlines() else "Applied marker found"))
+
+    status = "applied" if applied else ("reviewed" if reviewed_by or acked_by else "open")
+    return {
+        "found": bool(patches or comments),
+        "status": status,
+        "reviewed_by": reviewed_by,
+        "acked_by": acked_by,
+        "applied": applied,
+        "evidence": evidence[:3],
+        "comment_count": len(comments),
+        "patch_count": len(patches),
+    }
+
+
+async def _collect_lore_thread_intelligence(state: PatchWiseState, patch_text: str) -> dict[str, Any]:
+    input_url = state.get("input_url") or state.get("lore_url")
+    if not input_url:
+        message_id = re.search(r"Message-Id:\s*<([^>]+)>", patch_text, re.IGNORECASE)
+        if message_id:
+            input_url = f"https://lore.kernel.org/all/{message_id.group(1)}/"
+    if not input_url:
+        return _build_lore_thread_intelligence(None)
+
+    try:
+        thread = await fetch_lore_thread(str(input_url), "all")
+    except Exception:
+        thread = None
+    return _build_lore_thread_intelligence(thread)
 
 
 def _get_patchwise_skill() -> tuple[PatchWiseSkill | None, str | None]:
@@ -639,6 +807,7 @@ async def _run_version_pre_review(state: PatchWiseState, round_id: int) -> list[
 
 async def chanakya_review_node(state: PatchWiseState) -> PatchWiseState:
     round_id = state.get("current_round", 1)
+    session_id = str(state.get("session_id", "") or "")
     patch_text = state.get("current_patch") or state.get("patch_input", "")
     source_context = state.get("source_path", "")
     resolved_kernel_path = _resolve_kernel_path(source_context, patch_text)
@@ -652,6 +821,91 @@ async def chanakya_review_node(state: PatchWiseState) -> PatchWiseState:
     if hint:
         thinking += f" Interrupt hint received: {hint}."
     _emit_tokens(state, "chanakya", "thinking", round_id, thinking)
+
+    working_dir: str | None = None
+    if session_id:
+        try:
+            working_dir = await ssh_pool.ensure_work_dir(AgentRole.CHANAKYA, session_id)
+        except Exception as exc:
+            logger.warning("[CHANAKYA] unable to ensure working dir: %s", exc)
+    fallback_client = _FallbackAPIClient(
+        provider=state.get("llm_provider"),
+        model=state.get("llm_model"),
+    )
+    qgenie = QGenieExecutor(
+        ssh_pool=ssh_pool,
+        session_id=session_id,
+        fallback_api_client=fallback_client,
+    )
+    patch_subject = _extract_patch_subject(patch_text)
+    patch_hash = hashlib.sha256(patch_text.encode("utf-8", errors="ignore")).hexdigest()[:12]
+    q_results = await asyncio.gather(
+        qgenie.run(
+            agent_name="chanakya",
+            task=(
+                "Run a thorough checkpatch analysis on the following patch. "
+                "List ALL violations by category: ERROR, WARNING, CHECK. "
+                "For each violation provide the line number, the rule violated, "
+                "and a specific suggested fix. Also check commit message format "
+                "against kernel standards."
+            ),
+            context=patch_text,
+            working_dir=working_dir,
+        ),
+        qgenie.run(
+            agent_name="chanakya",
+            task=(
+                f"Research the upstream submission history for this patch on lore.kernel.org. "
+                f"Find prior versions, reviewer feedback, Acked-by/Reviewed-by tags, "
+                f"and rejection reasons. Patch title: {patch_subject}. "
+                f"Subsystem: {state.get('subsystem', 'audio')}. "
+                f"Patch hash: {patch_hash}."
+            ),
+            context=patch_text,
+            working_dir=working_dir,
+        ),
+        qgenie.run(
+            agent_name="chanakya",
+            task=(
+                "Validate all symbols used or exported in this patch. "
+                "Check: (1) all referenced symbols are defined in-tree, "
+                "(2) EXPORT_SYMBOL_GPL usage where required, "
+                "(3) symbol namespace violations."
+                f" Kernel tree path: {source_context or ssh_pool.kernel_path}"
+            ),
+            context=patch_text,
+            working_dir=working_dir,
+        ),
+        _collect_lore_thread_intelligence(state, patch_text),
+        return_exceptions=True,
+    )
+    q_checkpatch = q_results[0] if isinstance(q_results[0], dict) else {"success": False, "source": "fallback", "output": ""}
+    q_lore = q_results[1] if isinstance(q_results[1], dict) else {"success": False, "source": "fallback", "output": ""}
+    q_symbols = q_results[2] if isinstance(q_results[2], dict) else {"success": False, "source": "fallback", "output": ""}
+    lore_thread_intel = q_results[3] if isinstance(q_results[3], dict) else _build_lore_thread_intelligence(None)
+    q_sources = [q_checkpatch.get("source"), q_lore.get("source"), q_symbols.get("source")]
+    qgenie_source = "cli" if "cli" in q_sources else ("fallback" if "fallback" in q_sources else "none")
+    state["qgenie_last_source"] = qgenie_source
+    state["qgenie_working_dir"] = working_dir or ""
+    state["lore_thread_intelligence"] = lore_thread_intel
+    chanakya_confidence = 92
+    if qgenie_source != "cli":
+        chanakya_confidence -= 18
+    if lore_thread_intel.get("status") == "applied":
+        chanakya_confidence = max(chanakya_confidence, 90)
+    chanakya_confidence = max(0, min(100, chanakya_confidence))
+    state["chanakya_confidence"] = chanakya_confidence
+
+    shared_context = state.get("shared_a2a_context")
+    if isinstance(shared_context, dict):
+        shared_context["chanakya_knowledge"] = {
+            "qgenie_source": qgenie_source,
+            "checkpatch_summary": q_checkpatch.get("output", "")[:1500],
+            "lore_summary": q_lore.get("output", "")[:1500],
+            "symbol_summary": q_symbols.get("output", "")[:1500],
+            "lore_thread_intelligence": lore_thread_intel,
+            "confidence": chanakya_confidence,
+        }
 
     patchwise_status = {"used": False, "success": False, "error": None}
     patchwise_result: PatchWiseResult | None = None
@@ -686,16 +940,123 @@ async def chanakya_review_node(state: PatchWiseState) -> PatchWiseState:
                 "used": True,
                 "success": bool(patchwise_result.success),
                 "error": patchwise_result.error,
+                "source": qgenie_source,
+                "working_dir": working_dir or "",
+                "input_mode": state.get("input_mode", "raw"),
             }
         except Exception as exc:
-            patchwise_status = {"used": True, "success": False, "error": str(exc)}
+            patchwise_status = {
+                "used": True,
+                "success": False,
+                "error": str(exc),
+                "source": qgenie_source,
+                "working_dir": working_dir or "",
+                "input_mode": state.get("input_mode", "raw"),
+            }
     else:
-        patchwise_status = {"used": False, "success": False, "error": skill_error}
+        patchwise_status = {
+            "used": False,
+            "success": False,
+            "error": skill_error,
+            "source": qgenie_source,
+            "working_dir": working_dir or "",
+            "input_mode": state.get("input_mode", "raw"),
+        }
 
     if patchwise_result and patchwise_result.success and patchwise_result.issues:
         analyses = _analyses_from_patchwise(patchwise_result)
     else:
         analyses = full_patch_analysis(patch_text, source_context)
+
+    analyses.setdefault("style", []).extend(
+        _qgenie_findings_to_issues(
+            q_checkpatch.get("output", ""),
+            "STYLE",
+            "Apply checkpatch and commit-message corrections.",
+        )
+    )
+    analyses.setdefault("lkml", []).extend(
+        _qgenie_findings_to_issues(
+            q_lore.get("output", ""),
+            "COMPLIANCE",
+            "Address reviewer feedback or explain rationale in changelog.",
+        )
+    )
+    analyses.setdefault("logic", []).extend(
+        _qgenie_findings_to_issues(
+            q_symbols.get("output", ""),
+            "LOGIC",
+            "Fix symbol usage/export and cross-tree dependencies.",
+        )
+    )
+    if lore_thread_intel.get("found"):
+        thread_status = lore_thread_intel.get("status", "open")
+        if thread_status == "applied":
+            analyses.setdefault("lkml", []).append(
+                {
+                    "issue_type": "COMPLIANCE",
+                    "severity": "INFO",
+                    "line_number": 1,
+                    "description": "Lore thread indicates patch (or equivalent change) already applied upstream.",
+                    "suggestion": "Reference applied commit in changelog or skip resubmission of identical content.",
+                }
+            )
+        elif lore_thread_intel.get("reviewed_by", 0) or lore_thread_intel.get("acked_by", 0):
+            analyses.setdefault("lkml", []).append(
+                {
+                    "issue_type": "COMPLIANCE",
+                    "severity": "INFO",
+                    "line_number": 1,
+                    "description": (
+                        f"Lore thread has reviewer signals: Reviewed-by={lore_thread_intel.get('reviewed_by', 0)}, "
+                        f"Acked-by={lore_thread_intel.get('acked_by', 0)}."
+                    ),
+                    "suggestion": "Carry reviewer tags forward when reposting if changes are still valid.",
+                }
+            )
+
+    _emit(
+        state,
+        {
+            "agent": "chanakya",
+            "type": "analysis_source",
+            "round": round_id,
+            "content": (
+                f"QGenie routing: checkpatch={q_checkpatch.get('source')}, "
+                f"lore={q_lore.get('source')}, symbols={q_symbols.get('source')}"
+            ),
+            "metadata": {
+                "source": qgenie_source,
+                "task_type": "checkpatch",
+                "working_dir": working_dir or "",
+                "input_mode": state.get("input_mode", "raw"),
+                "confidence": state.get("chanakya_confidence", 0),
+            },
+        },
+    )
+    _emit(
+        state,
+        {
+            "agent": "chanakya",
+            "type": "lore_intelligence",
+            "round": round_id,
+            "content": (
+                "Lore intelligence: "
+                f"status={lore_thread_intel.get('status', 'unknown')}, "
+                f"reviewed_by={lore_thread_intel.get('reviewed_by', 0)}, "
+                f"acked_by={lore_thread_intel.get('acked_by', 0)}, "
+                f"applied={bool(lore_thread_intel.get('applied'))}"
+            ),
+            "metadata": {
+                "source": qgenie_source,
+                "task_type": "lore",
+                "thread_intelligence": lore_thread_intel,
+                "working_dir": working_dir or "",
+                "input_mode": state.get("input_mode", "raw"),
+                "confidence": state.get("chanakya_confidence", 0),
+            },
+        },
+    )
 
     version_issues = await _run_version_pre_review(state, round_id)
     similar_refs = SearchSkill().search(
@@ -887,6 +1248,12 @@ async def chanakya_review_node(state: PatchWiseState) -> PatchWiseState:
                     "analysis_mode": analysis_mode,
                     "patchwise": patchwise_status,
                     "issue": issue,
+                    "source": state.get("qgenie_last_source", "fallback"),
+                    "task_type": str(issue.get("category", "analysis")).lower(),
+                    "working_dir": state.get("qgenie_working_dir", ""),
+                    "input_mode": state.get("input_mode", "raw"),
+                    "lore_thread_intelligence": state.get("lore_thread_intelligence"),
+                    "confidence": state.get("chanakya_confidence", 0),
                 },
             },
         )
@@ -981,6 +1348,8 @@ async def chanakya_review_node(state: PatchWiseState) -> PatchWiseState:
             "type": "fix_complete",
             "round": round_id,
             "content": marked_patch,
+            "source": state.get("qgenie_last_source", "fallback"),
+            "task_type": "approval",
             "fix_summary": fix_summary,
             "changes_made": changes_made,
             "diff_from_previous": diff_from_previous,

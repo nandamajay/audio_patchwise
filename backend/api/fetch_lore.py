@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import email
 import gzip
-import io
 import re
 from typing import Optional
 
@@ -66,7 +65,8 @@ async def fetch_lore_patches(request: LoreFetchRequest) -> LoreFetchResponse:
     list_match = re.search(r"lore\.kernel\.org/([^/]+)/", url)
     list_name = list_match.group(1) if list_match else "all"
 
-    thread_url = f"https://lore.kernel.org/{list_name}/{msg_id_base.split('-')[0]}/"
+    # Use full message-id stem to resolve the thread anchor reliably.
+    thread_url = f"https://lore.kernel.org/{list_name}/{msg_id_base}/"
     mbox_url = f"{thread_url}t.mbox.gz"
 
     patches: list[PatchItem] = []

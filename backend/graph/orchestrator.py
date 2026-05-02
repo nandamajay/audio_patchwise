@@ -2,18 +2,21 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import time
 from datetime import datetime, timezone
 from typing import Any
 
 from api.dependencies import session_manager
 from api.ws_manager import websocket_manager
-from app.agents.aryabhata import aryabhata_fix_node
+from app.agents.aryabhata import aryabhata_fix_node_async
 from app.agents.chanakya import chanakya_review_node
 from graph.interrupt_handler import interrupt_handler
 from graph.patchwise_graph import on_state_change
 from services.history_manager import history_manager
 from session.session_manager import SessionStatus
+
+logger = logging.getLogger(__name__)
 
 
 def _utc_now() -> str:
@@ -128,7 +131,7 @@ async def aryabhata_node(state: dict[str, Any], config: dict) -> dict[str, Any]:
     latest_hint = hints[-1]["hint"] if hints else None
     if latest_hint:
         state["interrupt_hint"] = latest_hint
-    return aryabhata_fix_node(state)
+    return await aryabhata_fix_node_async(state)
 
 
 async def run_session_loop(session_id: str) -> None:

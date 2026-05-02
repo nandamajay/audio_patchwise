@@ -1,7 +1,6 @@
-import re, os, asyncio
-from pathlib import Path
+import re
 from dataclasses import dataclass, field
-from typing import List, Optional, Dict
+from typing import List, Optional
 import logging
 logger = logging.getLogger(__name__)
 
@@ -79,7 +78,8 @@ class AryabhataFixEngine:
                         if p.strip() in line:
                             new_lines.append(line.replace(p.strip(), f.strip()))
                             changed.append(i+1)
-                        else: new_lines.append(line)
+                        else:
+                            new_lines.append(line)
                     return {'success': len(changed)>0, 'content': '\n'.join(new_lines),
                             'changed_lines': changed, 'justification': f'Applied: {f[:60]}', 'error': ''}
         except Exception as e:
@@ -124,8 +124,8 @@ class AryabhataFixEngine:
         desc = issue.get('description','').lower()
         changed = []
         if 'changelog' in desc or 'changes in v' in desc:
-            insert_idx = next((i for i, l in enumerate(lines) if l.startswith('---') and i > 10), None)
-            if insert_idx:
+            insert_idx = next((i for i, line_text in enumerate(lines) if line_text.startswith('---') and i > 10), None)
+            if insert_idx is not None:
                 vm = re.search(r'v(\d+)', '\n'.join(lines[:20]))
                 v = vm.group(1) if vm else '2'
                 changelog = ['', f'*** changes in v{v} ***', '- Address reviewer feedback', '- Fix identified issues', '']
@@ -155,7 +155,7 @@ class AryabhataFixEngine:
                 files = re.findall(r'diff --git a/(\S+) b/', patch_content)
                 desc = f'fix {files[0].split("/")[-1].replace(".c","").replace("_"," ")} driver issues' if files else 'fix audio subsystem issues'
             cover = ('\n'.join([
-                f'From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001',
+                'From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001',
                 f'From: {author} <{email}>',
                 f'Date: {date}',
                 f'Subject: [PATCH v{version} 0/{total}] {sub}: {desc}',
@@ -176,9 +176,12 @@ class AryabhataFixEngine:
 
     def _extract_subsystem(self, content):
         for f in re.findall(r'diff --git a/(.*?) b/', content):
-            if 'sound/soc' in f or 'asoc' in f.lower(): return 'ASoC'
-            if 'sound/' in f: return 'ALSA'
-            if 'drivers/pinctrl' in f: return 'pinctrl'
+            if 'sound/soc' in f or 'asoc' in f.lower():
+                return 'ASoC'
+            if 'sound/' in f:
+                return 'ALSA'
+            if 'drivers/pinctrl' in f:
+                return 'pinctrl'
         return self.subsystem
 
     def _re(self, content, pattern):

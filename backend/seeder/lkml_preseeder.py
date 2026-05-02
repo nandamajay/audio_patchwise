@@ -3,7 +3,6 @@ Incremental LKML sync for PatchWise.
 """
 from __future__ import annotations
 
-import asyncio
 import logging
 import uuid
 import xml.etree.ElementTree as ET

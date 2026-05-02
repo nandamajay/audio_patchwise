@@ -4,7 +4,7 @@ import uuid
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Any, Dict, List, Optional
+from typing import Dict, List, Optional
 
 from knowledge.sqlite_store import SQLiteStore
 from app.runtime import connection_manager

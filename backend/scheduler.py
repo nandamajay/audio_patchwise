@@ -3,7 +3,6 @@ PatchWise Scheduler - APScheduler with SQLite job store.
 """
 from __future__ import annotations
 
-import asyncio
 import logging
 import os
 from datetime import datetime, timezone
@@ -16,7 +15,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 
-from database import get_db_connection, get_write_connection
+from database import get_write_connection
 from seeder.lkml_preseeder import run_incremental_seed
 
 logger = logging.getLogger(__name__)

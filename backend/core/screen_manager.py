@@ -5,7 +5,7 @@ import os
 import shlex
 from typing import Optional
 
-from core.ssh_pool import AgentRole, ExecutionMode, ssh_pool
+from core.ssh_pool import AgentRole, ssh_pool
 
 logger = logging.getLogger("uvicorn.error")
 

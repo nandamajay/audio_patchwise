@@ -6,12 +6,11 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field
 import email
 import gzip
-import io
 import json
 import os
 import re
 import sqlite3
-from typing import Any, Optional
+from typing import Optional
 
 import httpx
 

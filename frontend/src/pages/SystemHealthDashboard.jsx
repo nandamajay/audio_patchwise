@@ -225,7 +225,7 @@ export default function SystemHealthDashboard() {
 
       const blob = await response.blob();
       const disposition = response.headers.get("content-disposition") || "";
-      const match = disposition.match(/filename="?([^\"]+)"?/);
+      const match = disposition.match(/filename="?([^"]+)"?/);
       const filename = match?.[1] || `patchwise_profile_${Date.now()}.pkb`;
 
       const url = URL.createObjectURL(blob);

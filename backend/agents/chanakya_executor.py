@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import logging
 import os
 import re
@@ -16,6 +15,7 @@ logger = logging.getLogger("uvicorn.error")
 
 QGENIE_BASE_URL = os.getenv("QGENIE_BASE_URL", "https://qgenie-chat.qualcomm.com/v1")
 QGENIE_API_KEY = os.getenv("QGENIE_API_KEY", "")
+QGENIE_AGENT_BIN = os.getenv("QGENIE_AGENT_BIN", "qgenie")
 
 
 class ChanakyaExecutor:
@@ -64,7 +64,7 @@ class ChanakyaExecutor:
             timeout=20,
         )
         patch_files = [p.strip() for p in patches_res.stdout.splitlines() if p.strip().endswith(".patch")]
-        log_lines = [l.strip() for l in log_res.stdout.splitlines() if l.strip()]
+        log_lines = [log_line.strip() for log_line in log_res.stdout.splitlines() if log_line.strip()]
         mapping: dict[str, str] = {}
         for patch in patch_files:
             slug = patch.split("-", 1)[-1].replace(".patch", "").replace("-", " ").lower()
@@ -101,6 +101,7 @@ class ChanakyaExecutor:
             f"{provider_args}"
         )
         result = await ssh_pool.exec(self.agent, self.session_id, cmd, timeout=600)
+        qgenie_deep = await self.run_qgenie_deep_analysis(commits)
         if "ImportError" in result.stderr or "llvm-config" in result.stderr:
             logger.warning("[CHANAKYA] Full patchwise blocked (llvm-config) -> fallback checkpatch path")
             fallback_reviews = ["Checkpatch", "LLMCommitAudit"]
@@ -117,11 +118,37 @@ class ChanakyaExecutor:
                 "fallback_used": True,
                 "fallback_reason": "llvm-config not installed",
                 "reviews_run": fallback_reviews,
+                "qgenie_agent": qgenie_deep,
             }
         return {
             "output": result.stdout,
             "fallback_used": False,
             "reviews_run": reviews,
+            "qgenie_agent": qgenie_deep,
+        }
+
+    async def run_qgenie_deep_analysis(self, commits: List[str]) -> dict:
+        """
+        Complementary deep analysis via qgenie agent on dev-compute.
+        This is routed through the same shared SSH pool and A2A pipeline.
+        """
+        commit_list = ", ".join(commits) if commits else "HEAD"
+        prompt = (
+            f"Analyze Linux kernel repo at {self.kernel_path} for commits [{commit_list}]. "
+            "Run deep review tasks: checkpatch validation, clangd-assisted symbol tracing, "
+            "lore.kernel.org similar-thread checks, and upstream compliance risks. "
+            "Return concise JSON with keys: summary, findings, risks, suggested_actions."
+        )
+        cmd = (
+            "export PATH=$HOME/.local/bin:$PATH && "
+            f"{shlex.quote(QGENIE_AGENT_BIN)} agent {shlex.quote(prompt)}"
+        )
+        result = await ssh_pool.exec(self.agent, self.session_id, cmd, timeout=300)
+        return {
+            "stdout": result.stdout,
+            "stderr": result.stderr,
+            "exit_code": result.exit_code,
+            "agent_cmd": "qgenie agent",
         }
 
     async def run_git_show(self, commits: List[str]) -> dict:
