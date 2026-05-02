@@ -6,6 +6,8 @@ import re
 import base64
 import json
 import asyncio
+import os
+import uuid
 from typing import Optional
 
 from core.ssh_pool import AgentRole
@@ -13,7 +15,7 @@ from core.ssh_pool import AgentRole
 logger = logging.getLogger(__name__)
 
 QGENIE_PATH_PREFIX = "export PATH=$HOME/.local/bin:$PATH && "
-QGENIE_TIMEOUT = 120  # seconds
+QGENIE_TIMEOUT = int(os.getenv("PW_QGENIE_TIMEOUT_SECONDS", "300"))  # seconds
 QGENIE_RETRY_DELAYS = (2, 4)
 
 
@@ -149,15 +151,36 @@ class QGenieExecutor:
         return f"{role}\n\nTASK:\n{task}{ctx_block}"
 
     def _build_command(self, prompt: str, working_dir: Optional[str]) -> str:
-        prompt_file = "/tmp/pw_qgenie_prompt.txt"
+        token = uuid.uuid4().hex[:12]
+        prompt_file = f"/tmp/pw_qgenie_prompt_{token}.txt"
+        last_file = f"/tmp/pw_qgenie_last_{token}.txt"
+        stdout_file = f"/tmp/pw_qgenie_stdout_{token}.txt"
+        stderr_file = f"/tmp/pw_qgenie_stderr_{token}.txt"
         encoded_prompt = base64.b64encode(prompt.encode("utf-8")).decode("ascii")
         cd_prefix = f"cd {shlex.quote(working_dir)} && " if working_dir else ""
         write_prompt = (
             f"printf %s {shlex.quote(encoded_prompt)} | base64 -d > {shlex.quote(prompt_file)} && "
         )
-        run_cmd = f"qgenie agent exec --skip-git-repo-check \"$(cat {shlex.quote(prompt_file)})\" 2>&1"
-        cleanup = f"rm -f {shlex.quote(prompt_file)}"
-        return f"{cd_prefix}{QGENIE_PATH_PREFIX}{write_prompt}{run_cmd}; {cleanup}"
+        run_cmd = (
+            "qgenie agent exec --skip-git-repo-check "
+            f"--output-last-message {shlex.quote(last_file)} "
+            f"\"$(cat {shlex.quote(prompt_file)})\" "
+            f"> {shlex.quote(stdout_file)} 2> {shlex.quote(stderr_file)}"
+        )
+        emit_result = (
+            f"cat {shlex.quote(last_file)} 2>/dev/null; "
+            f"if [ ! -s {shlex.quote(last_file)} ]; then cat {shlex.quote(stdout_file)} 2>/dev/null; fi; "
+            "printf '\\n__PW_QGENIE_EXIT__=%s\\n' \"$ec\"; "
+            f"cat {shlex.quote(stderr_file)} 1>&2"
+        )
+        cleanup = (
+            f"rm -f {shlex.quote(prompt_file)} {shlex.quote(last_file)} "
+            f"{shlex.quote(stdout_file)} {shlex.quote(stderr_file)}"
+        )
+        return (
+            f"{cd_prefix}{QGENIE_PATH_PREFIX}{write_prompt}"
+            f"{run_cmd}; ec=$?; {emit_result}; {cleanup}; exit $ec"
+        )
 
     def _clean_cli_output(self, output: str) -> str:
         text = (output or "").strip()
@@ -166,6 +189,7 @@ class QGenieExecutor:
 
         lines = [ln.rstrip() for ln in text.splitlines() if ln.strip()]
         lines = [ln for ln in lines if not ln.startswith("WARNING: failed to clean up stale arg0")]
+        lines = [ln for ln in lines if not ln.startswith("__PW_QGENIE_EXIT__=")]
         if not lines:
             return ""
 
@@ -241,6 +265,15 @@ class QGenieExecutor:
 
     def _fallback(self, agent_name: str, task: str, context: Optional[str], reason: str = "") -> dict:
         if self.fallback and hasattr(self.fallback, "analyze"):
+            provider = str(getattr(self.fallback, "provider", "") or "").strip().lower()
+            if provider in {"qgenie", "qualcomm"} and not str(os.getenv("QGENIE_API_KEY", "")).strip():
+                logger.warning("[%s] HTTP fallback skipped: QGENIE_API_KEY missing", agent_name)
+                return {
+                    "success": False,
+                    "output": "",
+                    "source": "none",
+                    "error": f"{reason}; fallback_skipped=qgenie_key_missing",
+                }
             try:
                 logger.info("[%s] Using HTTP API fallback", agent_name)
                 result = self.fallback.analyze(task, context)
