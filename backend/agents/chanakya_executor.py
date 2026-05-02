@@ -10,6 +10,7 @@ from typing import List
 
 from core.screen_manager import screen_manager
 from core.ssh_pool import AgentRole, ssh_pool
+from graph.state import fix_ready_event
 
 logger = logging.getLogger("uvicorn.error")
 
@@ -222,12 +223,17 @@ class ChanakyaExecutor:
         )
 
         patch_files = await self._read_patch_files(patch_output_dir)
+        await self.emit_fix_ready_signal()
         return {
             "patch_files": patch_files,
             "validation": validation,
             "output_dir": patch_output_dir,
             "execution_mode": ssh_pool.mode.value,
         }
+
+    async def emit_fix_ready_signal(self) -> None:
+        fix_ready_event.set()
+        logger.info("[CHANAKYA] signal ARYABHATA: fix_ready")
 
     async def _self_validate(self, patch_dir: str) -> dict:
         result = await ssh_pool.exec(

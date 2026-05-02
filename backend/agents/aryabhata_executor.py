@@ -7,6 +7,7 @@ import shlex
 from typing import List, Optional
 
 from core.ssh_pool import AgentRole, ssh_pool
+from graph.state import fix_ready_event
 
 logger = logging.getLogger("uvicorn.error")
 
@@ -16,6 +17,7 @@ class AryabhataExecutor:
     ARYABHATA executor — Validator & Quality Gatekeeper.
     Runs independent checkpatch/patchwise and cross-line impact checks.
     Pre-loads context in parallel while CHANAKYA fixes.
+    Uses ssh_pool for aryabhata dev_compute execution with its own screen session.
     """
 
     def __init__(self, session_id: str):
@@ -125,6 +127,7 @@ class AryabhataExecutor:
         original_issues: List[dict],
         commits: List[str],
     ) -> dict:
+        await self.wait_for_fix_ready_event()
         if not self._preload_done.is_set():
             await asyncio.wait_for(self._preload_done.wait(), timeout=120)
         patch_dir = await self._write_patches_to_workdir(fixed_patches)
@@ -157,6 +160,9 @@ class AryabhataExecutor:
         validation["verdict"] = "LGTM" if all_clean else "NEEDS_WORK"
         validation["lgtm"] = all_clean
         return validation
+
+    async def wait_for_fix_ready_event(self) -> None:
+        await asyncio.wait_for(fix_ready_event.wait(), timeout=180)
 
     async def _write_patches_to_workdir(self, fixed_patches: List[dict]) -> str:
         work_dir = await ssh_pool.ensure_work_dir(self.agent, self.session_id)

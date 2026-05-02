@@ -17,7 +17,7 @@ When CHANAKYA flags issues, you MUST:
 
 CRITICAL RULE - NEVER DO THIS:
 [X] Issue #R1_001 [COMMIT] Line 1: Subject does not include subsystem prefix
-[X] Fix: Subject does not include subsystem prefix. Upstream expectation: apply canonical kernel style
+[X] Fix: Subject does not include subsystem prefix. Upstream expectation: follow subsystem-specific commit subject conventions
 [X] Repeating CHANAKYAs text back
 [X] Generic descriptions without actual patch output
 [X] Show Justification without a patch

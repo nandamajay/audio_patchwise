@@ -744,7 +744,7 @@ async def chanakya_review_node(state: PatchWiseState) -> PatchWiseState:
             "suggested_fix": _default_fix(problematic, raw_issue),
             "explanation": (
                 f"{raw_issue.get('description', '')}. "
-                f"Upstream expectation: {raw_issue.get('suggestion', 'apply canonical kernel style and logic fixes')}."
+                f"Upstream expectation: {raw_issue.get('suggestion', 'apply kernel conventions and logic fixes')}."
             ),
             "reference": (
                 "https://www.kernel.org/doc/html/latest/process/submitting-patches.html"

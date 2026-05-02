@@ -125,6 +125,13 @@ try:
 except Exception:
     pass
 
+try:
+    from api.inject21_routes import router as inject21_router
+
+    app.include_router(inject21_router)
+except Exception:
+    pass
+
 # Inject-specific patch upload endpoint package.
 try:
     from routers.patch_input import router as patch_input_router

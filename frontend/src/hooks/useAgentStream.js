@@ -10,6 +10,7 @@ export default function useAgentStream(sessionId) {
   const manualCloseRef = useRef(false);
   const updateStreamingMessage = useSessionStore((state) => state.updateStreamingMessage);
   const markConnected = useSessionStore((state) => state.markConnected);
+  const setSocket = useSessionStore((state) => state.setSocket);
 
   const connect = useCallback(() => {
     if (!sessionId) return;
@@ -27,6 +28,7 @@ export default function useAgentStream(sessionId) {
     const protocol = window.location.protocol === "https:" ? "wss" : "ws";
     const socket = new WebSocket(`${protocol}://${window.location.host}/ws/${sessionId}`);
     wsRef.current = socket;
+    setSocket(socket);
 
     socket.onopen = () => {
       retryRef.current = 0;
@@ -47,6 +49,7 @@ export default function useAgentStream(sessionId) {
     socket.onclose = () => {
       connectedRef.current = false;
       markConnected(false);
+      setSocket(null);
       if (manualCloseRef.current || activeSessionRef.current !== sessionId) return;
       const delay = Math.min(30000, 500 * 2 ** retryRef.current);
       retryRef.current += 1;
@@ -56,7 +59,7 @@ export default function useAgentStream(sessionId) {
     socket.onerror = () => {
       socket.close();
     };
-  }, [sessionId, markConnected, updateStreamingMessage]);
+  }, [sessionId, markConnected, setSocket, updateStreamingMessage]);
 
   useEffect(() => {
     connectedRef.current = false;
@@ -69,8 +72,9 @@ export default function useAgentStream(sessionId) {
       // socket cleanup on unmount
       wsRef.current?.close();
       wsRef.current = null;
+      setSocket(null);
     };
-  }, [connect]);
+  }, [connect, setSocket]);
 
   const sendEvent = useCallback((payload) => {
     if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;

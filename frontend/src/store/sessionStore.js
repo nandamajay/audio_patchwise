@@ -38,6 +38,7 @@ function toSelection(config) {
 }
 
 const useSessionStore = create((set, get) => ({
+  socket: null,
   sessionId: "",
   currentSessionId: null,
   patchId: "",
@@ -61,6 +62,12 @@ const useSessionStore = create((set, get) => ({
   loadingSessions: false,
   patchwiseStatus: null,
   patchwiseNotice: "",
+  agentStatus: null,
+  devComputeStatus: null,
+  patchEvolutionRounds: [],
+  jointVerdict: null,
+  approvalToken: null,
+  coverLetterDraft: null,
 
   setField: (field, value) =>
     set((state) => {
@@ -70,6 +77,7 @@ const useSessionStore = create((set, get) => ({
       return { [field]: value };
     }),
   setLlmModel: (model) => set(() => ({ llmModel: model })),
+  setSocket: (socket) => set(() => ({ socket })),
   setMaxRounds: (n) =>
     set(() => ({ maxRounds: Math.min(Math.max(Number(n) || 1, 1), 10) })),
   incrementRound: () =>
@@ -94,6 +102,15 @@ const useSessionStore = create((set, get) => ({
     }),
   setSession: (payload) => set(() => ({ ...payload })),
   setCurrentSession: (sessionId) => set(() => ({ currentSessionId: sessionId, sessionId })),
+  setAgentStatus: (status) => set(() => ({ agentStatus: status })),
+  setDevComputeStatus: (status) => set(() => ({ devComputeStatus: status })),
+  addPatchEvolutionRound: (round) =>
+    set((state) => ({
+      patchEvolutionRounds: [...state.patchEvolutionRounds, round],
+    })),
+  setJointVerdict: (verdict) => set(() => ({ jointVerdict: verdict })),
+  setApprovalToken: (token) => set(() => ({ approvalToken: token })),
+  setCoverLetterDraft: (draft) => set(() => ({ coverLetterDraft: draft })),
 
   addSystemMessage: (content) =>
     set((state) => {
@@ -125,6 +142,32 @@ const useSessionStore = create((set, get) => ({
         ...incoming,
         content: incoming.content || incoming.message || "",
       };
+
+      // Inject 21 websocket event state slices.
+      if (normalized.type === "agent_status_update") {
+        return { ...state, agentStatus: normalized };
+      }
+      if (normalized.type === "negotiation_update") {
+        return state;
+      }
+      if (normalized.type === "patch_evolution_update") {
+        return { ...state, patchEvolutionRounds: normalized.rounds || [] };
+      }
+      if (normalized.type === "joint_verdict") {
+        return { ...state, jointVerdict: normalized };
+      }
+      if (normalized.type === "aryabhata_approval") {
+        return { ...state, approvalToken: normalized.token || null };
+      }
+      if (normalized.type === "cover_letter_draft") {
+        return { ...state, coverLetterDraft: normalized };
+      }
+      if (normalized.type === "dev_compute_status") {
+        return { ...state, devComputeStatus: normalized };
+      }
+      if (normalized.type === "dev_compute_output") {
+        return state;
+      }
 
       const messages = [...state.messages];
       const last = messages[messages.length - 1];
@@ -271,10 +314,17 @@ const useSessionStore = create((set, get) => ({
       report: null,
       patchwiseStatus: null,
       patchwiseNotice: "",
+      agentStatus: null,
+      devComputeStatus: null,
+      patchEvolutionRounds: [],
+      jointVerdict: null,
+      approvalToken: null,
+      coverLetterDraft: null,
     })),
 }));
 
 export const displayRound = (state) =>
   Math.min(Number(state.currentRound || 0), Number(state.maxRounds || 1));
 
+export { useSessionStore };
 export default useSessionStore;

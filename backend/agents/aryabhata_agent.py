@@ -18,3 +18,29 @@ WHAT YOU MUST NEVER DO:
   - Never repeat issues CHANAKYA already found without validation.
   - Never issue LGTM if checkpatch still shows errors.
 """
+
+
+class AryabhataChallengePolicy:
+    def __init__(self):
+        self.challenge_count: dict[str, int] = {}
+        self.max_challenges = 1
+
+    def can_challenge(self, issue_id: str) -> bool:
+        current = self.challenge_count.get(issue_id, 0)
+        return current < self.max_challenges
+
+    def record_challenge(self, issue_id: str) -> bool:
+        if not self.can_challenge(issue_id):
+            return False
+        self.challenge_count[issue_id] = self.challenge_count.get(issue_id, 0) + 1
+        return True
+
+    def deadlock_to_user_arbitration(self, issue_id: str, attempts: int) -> dict:
+        if attempts > self.max_challenges:
+            return {
+                "issue_id": issue_id,
+                "action": "escalate_to_user",
+                "user_arbitration": True,
+                "reason": "deadlock detected",
+            }
+        return {"issue_id": issue_id, "action": "retry"}

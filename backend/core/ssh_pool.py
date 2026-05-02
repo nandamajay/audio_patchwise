@@ -163,7 +163,7 @@ class SSHPool:
                 self.mode = ExecutionMode.DEV_COMPUTE
                 self._record_event("connect", f"Connected to {self.host}")
                 await self._restore_screen_sessions()
-                logger.info("[SSHPool] Connected to %s as %s", self.host, self.user)
+                logger.info("[SSHPool] connected to %s as %s", self.host, self.user)
             except Exception as exc:
                 self._conn = None
                 logger.warning("[SSHPool] Connect failed: %s", exc)

@@ -73,3 +73,49 @@ RECURRING ISSUE ESCALATION
 - Escalate severity by one level.
 - Include explicit instruction to modify the exact target line.
 """
+
+
+class SurgicalScopeBuilder:
+    def build_scope(self, touched_lines: list[int], impact_scope: dict | None = None) -> dict:
+        impact_scope = impact_scope or {}
+        neighbors = impact_scope.get("direct", [])
+        touched_lines_impact = sorted(set(touched_lines or []) | set(neighbors or []))
+        return {
+            "surgical_scope": touched_lines_impact,
+            "impact_scope": impact_scope,
+            "touched_lines_impact": touched_lines_impact,
+        }
+
+
+class ChanakyaChallengeEngine:
+    def evaluate_challenge(self, issue_id: str, evidence: dict) -> dict:
+        strength = float(evidence.get("confidence", 0.0) or 0.0)
+        accepts = strength >= 0.7 or bool(evidence.get("checkpatch_error"))
+        if accepts:
+            return self.withdraw_issue(issue_id, evidence)
+        return {"issue_id": issue_id, "decision": "uphold", "reason": "insufficient evidence"}
+
+    def withdraw_issue(self, issue_id: str, evidence: dict) -> dict:
+        return {
+            "issue_id": issue_id,
+            "decision": "withdraw",
+            "accepted_evidence": evidence,
+        }
+
+    def smart_hybrid_re_review(self, touched_lines: list[int], impact_scope: dict, new_issues: list[dict]) -> dict:
+        # smart_hybrid strategy: surgical_first, escalate_full when touched scope keeps producing new blockers.
+        builder = SurgicalScopeBuilder()
+        scope = builder.build_scope(touched_lines, impact_scope)
+        if any(i.get("severity") == "BLOCKING" for i in new_issues):
+            return {
+                "smart_hybrid": True,
+                "surgical_first": True,
+                "escalate_full_review": True,
+                "scope": scope,
+            }
+        return {
+            "smart_hybrid": True,
+            "surgical_first": True,
+            "escalate_full_review": False,
+            "scope": scope,
+        }
